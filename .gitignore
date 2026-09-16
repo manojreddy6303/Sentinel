@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+
+# Databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Storage artifacts (preserve directory structure via .gitkeep and README.md)
+storage/*
+!storage/README.md
+!storage/uploads/
+storage/uploads/*
+!storage/uploads/.gitkeep
+!storage/evidence/
+storage/evidence/*
+!storage/evidence/.gitkeep
+!storage/reports/
+storage/reports/*
+!storage/reports/.gitkeep
+!storage/events/
+storage/events/*
+!storage/events/.gitkeep
+
+# YOLO / PyTorch model weights and Ultralytics cache
+*.pt
+*.pth
+*.onnx
+runs/
+
