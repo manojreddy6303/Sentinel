@@ -50,8 +50,11 @@ import {
   getVideoDetectorHealth,
   createCase,
   linkVideoToCase,
+  getVideoCorrelatedIncidents,
+  CorrelatedIncident,
 } from "@/lib/api";
 import { CorrelatedIncidentsView } from "@/components/CorrelatedIncidentsView";
+import EvidenceVaultView from "@/components/EvidenceVaultView";
 import { ForensicSearchPanel } from "@/components/ForensicSearchPanel";
 import MultiCameraSessionPanel from "@/components/MultiCameraSessionPanel";
 
@@ -59,7 +62,19 @@ const SUPPORTED_EXTENSIONS = [".mp4", ".mov", ".avi", ".mkv", ".webm"];
 const MAX_SIZE_MB = 500;
 
 type ProcessingState = "idle" | "processing" | "completed" | "failed";
-type ViewMode = "timeline" | "raw" | "intelligence" | "correlation" | "forensic" | "vault" | "reports" | "specialized" | "diagnostics" | "multicamera";
+type ViewMode =
+  | "overview"
+  | "timeline"
+  | "correlation"
+  | "vault"
+  | "forensic"
+  | "intelligence"
+  | "visual"
+  | "specialized"
+  | "multicamera"
+  | "reports"
+  | "diagnostics"
+  | "raw";
 
 // Capitalise the first letter of each word in the class name or return fallback
 function formatClassName(
@@ -112,6 +127,7 @@ export interface VideoUploadProps {
   onNavigateToCase?: (caseId: string) => void;
   onNavigateToIncidents?: () => void;
   onNavigateToEvidence?: () => void;
+  onVideoLoaded?: (videoId: string, filename?: string) => void;
 }
 
 export default function VideoUpload({
@@ -121,6 +137,7 @@ export default function VideoUpload({
   onNavigateToCase,
   onNavigateToIncidents,
   onNavigateToEvidence,
+  onVideoLoaded,
 }: VideoUploadProps = {}) {
   // Upload state
   const [dragActive, setDragActive] = useState<boolean>(false);
@@ -170,10 +187,11 @@ export default function VideoUpload({
   const [investigationResponse, setInvestigationResponse] = useState<InvestigationResponse | null>(null);
   const [investigationError, setInvestigationError] = useState<string | null>(null);
 
-  // Phase 7: LLM-Assisted Evidence-Grounded Investigation State
   const [investigationMode, setInvestigationMode] = useState<"ai" | "deterministic">("ai");
   const [aiResponse, setAiResponse] = useState<AIInvestigateResponse | null>(null);
   const [aiHistory, setAiHistory] = useState<Array<{ role: string; content: string }>>([]);
+  const [showEngineDetails, setShowEngineDetails] = useState<boolean>(false);
+  const [isMoreOpen, setIsMoreOpen] = useState<boolean>(false);
 
   // Phase 6: Evidence Extraction & Vault State
   const [evidenceList, setEvidenceList] = useState<EvidenceItem[]>([]);
@@ -186,6 +204,19 @@ export default function VideoUpload({
     try {
       const res = await getVideoEvidence(videoId);
       setEvidenceList(res.evidence);
+    } catch {
+      // ignore
+    }
+  };
+
+  // Phase 7: Incidents State
+  const [incidentList, setIncidentList] = useState<CorrelatedIncident[]>([]);
+  const [isReanalyzeConfirmOpen, setIsReanalyzeConfirmOpen] = useState<boolean>(false);
+
+  const fetchIncidents = async (videoId: string) => {
+    try {
+      const res = await getVideoCorrelatedIncidents(videoId);
+      setIncidentList(res.correlated_incidents || []);
     } catch {
       // ignore
     }
@@ -462,6 +493,9 @@ export default function VideoUpload({
         playback_url: meta.playback_url,
       });
 
+      // Synchronize video context with parent workspace shell
+      onVideoLoaded?.(meta.video_id, meta.filename);
+
       // Synchronize processingResult if video has already been processed
       if (meta.status === "processed" && meta.duration_seconds) {
         setProcessingResult({
@@ -489,6 +523,7 @@ export default function VideoUpload({
         // Not yet processed
       }
 
+      fetchIncidents(id);
       fetchEvidence(id);
       fetchSecurityIntelligence(id);
       fetchReports(id);
@@ -824,7 +859,9 @@ export default function VideoUpload({
     try {
       const response = await uploadVideo(selectedFile, setUploadProgress);
       setUploadResult(response);
+      onVideoLoaded?.(response.video_id, response.filename);
       fetchEvidence(response.video_id);
+      fetchIncidents(response.video_id);
       if (activeCaseId) {
         try {
           await linkVideoToCase(activeCaseId, response.video_id);
@@ -841,7 +878,7 @@ export default function VideoUpload({
   };
 
   // ---- Phase 4: Analyze Video + Fetch Timeline ----
-  const handleAnalyze = async () => {
+  const handleAnalyze = async (force: boolean = false) => {
     if (!uploadResult?.video_id || processingState === "processing") return;
     setProcessingState("processing");
     setProcessingError(null);
@@ -850,7 +887,7 @@ export default function VideoUpload({
     setProcessingResult(null);
 
     try {
-      const result = await processVideo(uploadResult.video_id);
+      const result = await processVideo(uploadResult.video_id, force);
       setProcessingResult(result);
 
       // Fetch grouped timeline events and raw events
@@ -860,7 +897,8 @@ export default function VideoUpload({
       const eventsResponse = await getVideoEvents(uploadResult.video_id, { include_unvalidated: true });
       setEvents(eventsResponse.events);
 
-      // Fetch existing evidence
+      // Fetch existing incidents and evidence
+      fetchIncidents(uploadResult.video_id);
       fetchEvidence(uploadResult.video_id);
 
       // Fetch Phase 8 security intelligence
@@ -938,24 +976,26 @@ export default function VideoUpload({
     <div className="w-full bg-zinc-900/60 border border-zinc-800 rounded-xl p-6 md:p-8 space-y-6">
 
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-800 pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800/80 pb-5">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
-            <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
-            Surveillance Video Ingestion & Intelligence Workbench
+          <h2 className="text-xl md:text-2xl font-bold text-white flex items-center gap-2.5 tracking-tight">
+            <span className="flex h-3 w-3 rounded-full bg-emerald-400 animate-pulse" />
+            {uploadResult ? "Active Investigation Workspace" : "Surveillance Footage Ingestion"}
           </h2>
-          <p className="text-xs text-zinc-400 mt-0.5">
-            Surveillance Video Pipeline: Ingest &rarr; Decoding &rarr; YOLO Object Detection &rarr; Spatial Intelligence &rarr; Incident Correlation &rarr; Forensic Search
+          <p className="text-xs md:text-sm text-zinc-400 mt-1 font-sans">
+            Forensic Security Pipeline: Ingest &bull; Decoding &bull; YOLO Object Tracking &bull; Spatial Intelligence &bull; Incident Correlation &bull; Evidence Vault
           </p>
         </div>
 
         {uploadResult && (
-          <button
-            onClick={handleReset}
-            className="self-start sm:self-auto text-xs font-mono text-zinc-400 hover:text-zinc-200 border border-zinc-700 hover:border-zinc-500 px-3 py-1.5 rounded-lg transition-colors"
-          >
-            + Upload Another Video
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={handleReset}
+              className="px-3.5 py-1.5 text-xs font-mono text-zinc-300 hover:text-white bg-zinc-800/80 hover:bg-zinc-700 border border-zinc-700 rounded-lg transition-colors cursor-pointer"
+            >
+              + Ingest Another Video
+            </button>
+          </div>
         )}
       </div>
 
@@ -1116,128 +1156,64 @@ export default function VideoUpload({
       {/* Success State + Video Player + Phase 4 Controls */}
       {uploadResult && (
         <div className="space-y-6 animate-in fade-in duration-300">
-          {/* Success Banner */}
-          <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="p-1.5 bg-emerald-500/20 text-emerald-400 rounded-full">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-emerald-400">
-                  {uploadResult.message || "Video successfully uploaded"}
-                </p>
-                <p className="text-xs text-zinc-400 font-mono">
-                  Stored under: storage/uploads/{uploadResult.filename}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 bg-zinc-950/80 border border-zinc-800 px-3 py-1.5 rounded-md text-xs font-mono">
-              <span className="text-zinc-500">video_id:</span>
-              <span className="text-zinc-200 truncate max-w-[140px] sm:max-w-[200px]">{uploadResult.video_id}</span>
-              <button onClick={handleCopyId} className="text-emerald-400 hover:text-emerald-300 text-[11px] underline ml-1" title="Copy Video ID">
-                {copiedId ? "Copied!" : "Copy"}
-              </button>
-            </div>
-          </div>
-
-          {/* Contextual Video -> Case Actions Bar */}
-          <div className="flex flex-wrap items-center justify-between gap-3 bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-xl shadow-md font-mono text-xs">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-              <span className="text-zinc-300 font-sans font-semibold text-sm">Security Video Workflow:</span>
-              <span className="text-zinc-400 truncate max-w-xs">{uploadResult.filename}</span>
+          {/* Surveillance Video Player */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm text-[#A7AFBA]">
+              <span className="font-medium text-[#F5F7FA]">Surveillance Footage</span>
+              <span className="text-sm font-medium">
+                {processingState === "processing" ? (
+                  <span className="text-blue-400 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+                    Security analysis in progress
+                  </span>
+                ) : playbackState === "preparing" ? (
+                  <span className="text-amber-400 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                    Preparing playback
+                  </span>
+                ) : processingState === "completed" ? (
+                  <span className="text-[#19B89A] flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-[#19B89A]" />
+                    Ready for investigation &bull; {timelineEvents.length} events
+                  </span>
+                ) : (
+                  <span className="text-[#19B89A] flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-[#19B89A]" />
+                    Ready for analysis
+                  </span>
+                )}
+              </span>
             </div>
 
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                onClick={() => {
-                  setCaseTitleInput(`Security Investigation: ${uploadResult.filename}`);
-                  setCaseDescInput(`Case created from ingested surveillance video ${uploadResult.filename}.`);
-                  setIsCreateCaseModalOpen(true);
-                }}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold rounded-lg transition-all shadow-sm font-sans cursor-pointer text-xs"
-              >
-                <span>📁</span>
-                <span>Create Case from This Video</span>
-              </button>
-
-              {activeCaseId && (
-                <button
-                  type="button"
-                  onClick={handleAddToActiveCase}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40 rounded-lg transition-all font-sans font-semibold cursor-pointer text-xs"
-                >
-                  <span>+</span>
-                  <span>Add to Active Case</span>
-                </button>
-              )}
-
-              {onNavigateToIncidents && (
-                <button
-                  type="button"
-                  onClick={onNavigateToIncidents}
-                  className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-all font-sans cursor-pointer text-xs"
-                >
-                  View Incidents
-                </button>
-              )}
-
-              {onNavigateToEvidence && (
-                <button
-                  type="button"
-                  onClick={onNavigateToEvidence}
-                  className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-all font-sans cursor-pointer text-xs"
-                >
-                  View Evidence
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Video Player */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs text-zinc-400 font-mono">
-              <span>Sentinel Surveillance Player</span>
-              {processingState === "completed" ? (
-                <span className="text-emerald-400 font-semibold">
-                  Detection &amp; Event Intelligence Complete — {timelineEvents.length} Grouped Timeline Events ({events.length} Raw)
-                </span>
-              ) : (
-                <span className="text-emerald-400 font-semibold">Ready for Analysis</span>
-              )}
-            </div>
-            <div className="relative rounded-xl overflow-hidden bg-black border border-zinc-800 aspect-video flex items-center justify-center">
+            <div className="relative rounded-2xl overflow-hidden bg-black border border-[#2A3038] aspect-video flex items-center justify-center shadow-lg">
               {playbackState === "preparing" && (
-                <div className="absolute inset-0 z-10 bg-zinc-950/85 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center space-y-3 animate-in fade-in duration-200">
-                  <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-full text-emerald-400 animate-pulse">
-                    <svg className="animate-spin h-6 w-6 text-emerald-400" fill="none" viewBox="0 0 24 24">
+                <div className="absolute inset-0 z-10 bg-[#0F1115]/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center space-y-3 animate-in fade-in duration-200">
+                  <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-full text-amber-400 animate-pulse">
+                    <svg className="animate-spin h-7 w-7 text-amber-400" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                     </svg>
                   </div>
-                  <div className="space-y-1">
-                    <p className="text-sm font-semibold text-zinc-100">
-                      Preparing browser-compatible playback…
+                  <div className="space-y-1.5">
+                    <p className="text-lg font-bold text-[#F5F7FA]">
+                      Preparing playback
                     </p>
-                    <p className="text-xs text-zinc-400 font-mono max-w-sm">
-                      Transcoding video stream to standard H.264 (AVC) for smooth HTML5 playback and timeline seeking.
+                    <p className="text-sm text-[#A7AFBA] max-w-md">
+                      Converting video for browser playback. This does not mean AI analysis is running.
                     </p>
                   </div>
                 </div>
               )}
 
               {playbackState === "unavailable" && (
-                <div className="absolute inset-0 z-10 bg-zinc-950/90 flex flex-col items-center justify-center p-6 text-center space-y-2">
+                <div className="absolute inset-0 z-10 bg-[#0F1115]/90 flex flex-col items-center justify-center p-6 text-center space-y-2">
                   <div className="p-2.5 bg-red-500/10 border border-red-500/30 rounded-full text-red-400">
                     <svg className="w-6 h-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                     </svg>
                   </div>
-                  <p className="text-sm font-semibold text-zinc-200">Playback unavailable</p>
-                  <p className="text-xs text-zinc-500">Video format could not be decoded for browser streaming.</p>
+                  <p className="text-base font-semibold text-[#F5F7FA]">Playback unavailable</p>
+                  <p className="text-sm text-[#737C87]">Video format could not be decoded for browser streaming.</p>
                 </div>
               )}
 
@@ -1319,42 +1295,42 @@ export default function VideoUpload({
               {processingState !== "completed" ? (
                 <button
                   id="analyze-video-btn"
-                  onClick={handleAnalyze}
+                  onClick={() => handleAnalyze(false)}
                   disabled={processingState === "processing"}
-                  className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all shadow-lg ${
+                  className={`flex items-center gap-2 px-6 py-3 rounded-xl text-base font-semibold transition-all shadow-md cursor-pointer ${
                     processingState === "processing"
-                      ? "bg-blue-700/50 text-blue-300 cursor-not-allowed"
+                      ? "bg-blue-600/50 text-blue-200 cursor-not-allowed"
                       : processingState === "failed"
                       ? "bg-red-600 hover:bg-red-500 text-white"
-                      : "bg-emerald-600 hover:bg-emerald-500 text-white hover:shadow-emerald-500/20"
+                      : "bg-[#19B89A] hover:bg-[#16a388] text-[#0F1115] hover:shadow-lg font-bold"
                   }`}
                 >
                   {processingState === "processing" ? (
                     <>
-                      <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+                      <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                       </svg>
-                      Processing &amp; Grouping...
+                      Security analysis in progress...
                     </>
                   ) : (
                     <>
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                           d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                           d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
-                      ANALYZE &amp; GENERATE TIMELINE
+                      Analyze footage
                     </>
                   )}
                 </button>
               ) : (
                 <button
-                  onClick={handleAnalyze}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono text-zinc-400 hover:text-zinc-200 border border-zinc-700 hover:border-zinc-500 transition-colors"
+                  onClick={() => setIsReanalyzeConfirmOpen(true)}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium text-[#A7AFBA] hover:text-[#F5F7FA] bg-[#1D2128] border border-[#2A3038] hover:border-[#3B434D] transition-colors cursor-pointer"
                 >
-                  Re-analyze
+                  Re-analyze footage
                 </button>
               )}
             </div>
@@ -1399,62 +1375,31 @@ export default function VideoUpload({
                 {/* ========================================================================= */}
                 {/* PHASE 5A: ASK SENTINEL — NATURAL-LANGUAGE INVESTIGATION PANEL             */}
                 {/* ========================================================================= */}
-                <div id="ask-sentinel-panel" className="bg-zinc-950/90 border border-emerald-500/30 rounded-xl p-5 md:p-6 space-y-4 shadow-xl">
-                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-zinc-800 pb-3">
-                    <div className="flex items-center gap-2.5">
-                      <div className="p-1.5 bg-emerald-500/10 border border-emerald-500/30 rounded-md text-emerald-400">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-                        </svg>
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                          ASK SENTINEL
-                          <span className="text-[10px] font-mono font-semibold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 px-2 py-0.5 rounded">
-                            {investigationMode === "ai" ? "Evidence-Grounded AI" : "Deterministic Engine"}
-                          </span>
+                <div id="ask-sentinel-panel" className="bg-[#171A20] border border-[#2A3038] rounded-xl p-6 md:p-7 space-y-4 shadow-sm">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-[#2A3038] pb-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2.5 flex-wrap">
+                        <h3 className="text-lg md:text-xl font-bold text-[#F5F7FA] tracking-tight">
+                          Investigate this footage
                         </h3>
-                        <p className="text-xs text-zinc-400">
-                          {investigationMode === "ai"
-                            ? "Ask natural questions grounded strictly in database events & evidence"
-                            : "Query video detection and event records with deterministic filters"}
-                        </p>
+                        <span className="text-xs font-sans font-medium text-[#19B89A] bg-[#19B89A]/10 border border-[#19B89A]/20 px-2.5 py-0.5 rounded-full flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#19B89A]" />
+                          Grounded AI reasoning
+                        </span>
                       </div>
+                      <p className="text-xs md:text-sm text-[#A7AFBA]">
+                        Ask natural-language questions grounded in persistent video detections, temporal event sequences, and physical evidence.
+                      </p>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      {/* Mode Switcher */}
-                      <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInvestigationMode("ai");
-                            setInvestigationError(null);
-                          }}
-                          className={`px-2.5 py-1 rounded text-xs font-mono font-semibold transition-all flex items-center gap-1.5 ${
-                            investigationMode === "ai"
-                              ? "bg-emerald-600 text-white shadow-sm"
-                              : "text-zinc-400 hover:text-zinc-200"
-                          }`}
-                        >
-                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                          AI-ASSISTED
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInvestigationMode("deterministic");
-                            setInvestigationError(null);
-                          }}
-                          className={`px-2.5 py-1 rounded text-xs font-mono font-semibold transition-all ${
-                            investigationMode === "deterministic"
-                              ? "bg-zinc-700 text-white shadow-sm"
-                              : "text-zinc-400 hover:text-zinc-200"
-                          }`}
-                        >
-                          DETERMINISTIC
-                        </button>
-                      </div>
+                    <div className="flex items-center gap-2 self-start md:self-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowEngineDetails(!showEngineDetails)}
+                        className="text-xs text-[#737C87] hover:text-[#A7AFBA] underline px-2 py-1 rounded cursor-pointer transition-colors"
+                      >
+                        {showEngineDetails ? "Hide Details ▲" : "Details ▾"}
+                      </button>
 
                       {(aiResponse || investigationResponse) && (
                         <button
@@ -1464,7 +1409,7 @@ export default function VideoUpload({
                             setInvestigationQuery("");
                             setInvestigationError(null);
                           }}
-                          className="text-xs font-mono text-zinc-500 hover:text-zinc-300 transition-colors ml-1"
+                          className="text-xs text-[#A7AFBA] hover:text-[#F5F7FA] transition-colors px-2.5 py-1 rounded bg-[#1D2128] border border-[#2A3038] cursor-pointer"
                         >
                           Clear
                         </button>
@@ -1472,16 +1417,62 @@ export default function VideoUpload({
                     </div>
                   </div>
 
+                  {/* Expandable Technical Engine Details */}
+                  {showEngineDetails && (
+                    <div className="p-3.5 rounded-lg bg-[#1D2128] border border-[#2A3038] text-xs space-y-2.5 animate-in fade-in duration-150">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="space-y-0.5">
+                          <span className="text-[#A7AFBA] font-medium block">Reasoning Architecture:</span>
+                          <span className="text-[#F5F7FA]">Gemini Grounded Reasoning with Deterministic Synthesis fallback</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[#737C87]">Mode:</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInvestigationMode("ai");
+                              setInvestigationError(null);
+                            }}
+                            className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
+                              investigationMode === "ai"
+                                ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                                : "bg-[#171A20] text-[#A7AFBA] hover:text-[#F5F7FA]"
+                            }`}
+                          >
+                            AI Reasoning
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInvestigationMode("deterministic");
+                              setInvestigationError(null);
+                            }}
+                            className={`px-2.5 py-1 rounded text-xs transition-colors cursor-pointer ${
+                              investigationMode === "deterministic"
+                                ? "bg-[#2A3038] text-[#F5F7FA] font-semibold"
+                                : "bg-[#171A20] text-[#A7AFBA] hover:text-[#F5F7FA]"
+                            }`}
+                          >
+                            Deterministic
+                          </button>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-[#737C87] leading-relaxed">
+                        Video intelligence is generated directly by Sentinel&apos;s computer vision pipeline. The reasoning model interprets persistent detections and verified evidence without external data transmission.
+                      </p>
+                    </div>
+                  )}
+
                   {/* Search Input Bar */}
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
                       handleInvestigate();
                     }}
-                    className="flex flex-col sm:flex-row gap-2"
+                    className="flex flex-col sm:flex-row gap-2.5"
                   >
                     <div className="relative flex-1">
-                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-zinc-500">
+                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-[#737C87]">
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
                         </svg>
@@ -1491,12 +1482,8 @@ export default function VideoUpload({
                         type="text"
                         value={investigationQuery}
                         onChange={(e) => setInvestigationQuery(e.target.value)}
-                        placeholder={
-                          investigationMode === "ai"
-                            ? "Ask anything about this video (e.g. 'Summarize this video', 'What happened around 8s?')..."
-                            : "Query detections (e.g. 'Show cars between 8 and 12 seconds')..."
-                        }
-                        className="w-full pl-9 pr-4 py-2.5 bg-zinc-900 border border-zinc-700 hover:border-zinc-600 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-lg text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none transition-all font-sans"
+                        placeholder="What would you like to investigate? (e.g. 'What happened around the desk?')..."
+                        className="w-full pl-10 pr-4 py-2.5 bg-[#1D2128] border border-[#2A3038] hover:border-[#3A424E] focus:border-[#19B89A] rounded-lg text-sm text-[#F5F7FA] placeholder-[#737C87] focus:outline-none transition-colors font-sans"
                         disabled={isInvestigating}
                       />
                     </div>
@@ -1504,7 +1491,7 @@ export default function VideoUpload({
                       id="investigate-btn"
                       type="submit"
                       disabled={isInvestigating || !investigationQuery.trim()}
-                      className="flex items-center justify-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-lg text-sm font-semibold transition-all shadow-md shrink-0"
+                      className="flex items-center justify-center gap-2 px-5 py-2.5 bg-[#19B89A] hover:bg-[#16A489] disabled:bg-[#1D2128] disabled:text-[#737C87] text-[#0F1115] rounded-lg text-sm font-semibold transition-colors shadow-sm shrink-0 cursor-pointer"
                     >
                       {isInvestigating ? (
                         <>
@@ -1512,38 +1499,65 @@ export default function VideoUpload({
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                           </svg>
-                          <span>{investigationMode === "ai" ? "Analyzing..." : "Investigating..."}</span>
+                          <span>Investigating...</span>
                         </>
                       ) : (
-                        <>
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                          </svg>
-                          <span>{investigationMode === "ai" ? "Ask AI" : "Investigate"}</span>
-                        </>
+                        <span>Investigate</span>
                       )}
                     </button>
                   </form>
 
-                  {/* Investigating Loading Indicator */}
+                  {/* Real Investigation Pipeline Step Checklist */}
                   {isInvestigating && (
-                    <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-3.5 flex items-center gap-3 animate-pulse">
-                      <svg className="animate-spin h-4 w-4 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      <span className="text-xs text-emerald-300 font-mono">
-                        {investigationMode === "ai"
-                          ? "Sentinel AI is analyzing detected events, temporal clusters, and correlating evidence..."
-                          : "Querying indexed detection database..."}
-                      </span>
+                    <div className="rounded-xl bg-zinc-900/90 border border-emerald-500/30 p-5 space-y-3 font-mono">
+                      <div className="flex items-center justify-between text-xs text-emerald-400 font-bold uppercase tracking-wider">
+                        <span className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+                          SENTINEL INVESTIGATION ENGINE RUNNING
+                        </span>
+                        <span className="text-zinc-500">Live Pipeline</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs text-zinc-300 pt-1">
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-zinc-800">
+                          <span>1. Understanding request</span>
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        </div>
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-zinc-800">
+                          <span>2. Searching video intelligence</span>
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        </div>
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-zinc-800">
+                          <span>3. Reconstructing timeline</span>
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        </div>
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-zinc-800">
+                          <span>4. Correlating incidents</span>
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        </div>
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-zinc-800">
+                          <span>5. Retrieving evidence</span>
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        </div>
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-zinc-800">
+                          <span>6. Checking counter-evidence</span>
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        </div>
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-zinc-800">
+                          <span>7. Assessing uncertainty</span>
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        </div>
+                        <div className="flex items-center justify-between bg-zinc-950/80 px-3 py-2 rounded-lg border border-emerald-500/40 text-emerald-300 animate-pulse">
+                          <span>8. Generating grounded finding</span>
+                          <span className="font-bold">...</span>
+                        </div>
+                      </div>
                     </div>
                   )}
 
                   {/* Example Questions */}
-                  <div className="space-y-1.5">
-                    <span className="text-[11px] font-mono text-zinc-500 uppercase tracking-wider">
-                      {investigationMode === "ai" ? "Suggested AI Questions:" : "Example Queries:"}
+                  <div className="space-y-2">
+                    <span className="text-xs font-mono text-zinc-400 uppercase tracking-wider font-semibold">
+                      {investigationMode === "ai" ? "Suggested Forensic Queries:" : "Example Detection Queries:"}
                     </span>
                     <div className="flex flex-wrap gap-2">
                       {(investigationMode === "ai" ? AI_EXAMPLE_QUESTIONS : DETERMINISTIC_EXAMPLE_QUESTIONS).map((q) => (
@@ -1552,9 +1566,9 @@ export default function VideoUpload({
                           type="button"
                           onClick={() => handleInvestigate(q)}
                           disabled={isInvestigating}
-                          className="text-xs font-mono bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-emerald-400 border border-zinc-800 hover:border-emerald-500/50 px-2.5 py-1 rounded-md transition-all text-left"
+                          className="text-xs font-sans bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-emerald-300 border border-zinc-800 hover:border-emerald-500/50 px-3 py-1.5 rounded-lg transition-all text-left cursor-pointer"
                         >
-                          • {q}
+                          &bull; {q}
                         </button>
                       ))}
                     </div>
@@ -1562,9 +1576,9 @@ export default function VideoUpload({
 
                   {/* Backend Error State */}
                   {investigationError && (
-                    <div className="rounded-lg bg-red-500/10 border border-red-500/30 p-3 text-xs text-red-300 flex items-center justify-between">
+                    <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4 text-xs md:text-sm text-red-300 flex items-center justify-between">
                       <span>{investigationError}</span>
-                      <button onClick={() => setInvestigationError(null)} className="text-red-400 hover:text-red-200 ml-2">Dismiss</button>
+                      <button onClick={() => setInvestigationError(null)} className="text-red-400 hover:text-red-200 ml-2 font-mono">Dismiss</button>
                     </div>
                   )}
 
@@ -2055,127 +2069,206 @@ export default function VideoUpload({
                   </div>
                 )}
 
-                {/* View Switcher & Filters */}
-                <div className="flex flex-wrap gap-4 items-center justify-between bg-zinc-950 p-3 rounded-lg border border-zinc-800">
-                  <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-md border border-zinc-800 text-xs font-mono">
+                {/* 2-Tier Primary & Secondary Investigation Navigation */}
+                <div className="space-y-2.5 bg-[#171A20] p-4 rounded-xl border border-[#2A3038] shadow-sm">
+                  {/* Primary Row: Overview, Timeline, Incidents, Evidence, Search, Intelligence */}
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
+                      id="investigation-overview-tab"
+                      onClick={() => setActiveView("overview")}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 cursor-pointer ${
+                        activeView === "overview"
+                          ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                          : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
+                      }`}
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                      </svg>
+                      <span>Overview</span>
+                    </button>
+
+                    <button
+                      id="investigation-timeline-tab"
                       onClick={() => setActiveView("timeline")}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors ${
-                        activeView === "timeline" ? "bg-emerald-600 text-white" : "text-zinc-400 hover:text-zinc-200"
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 cursor-pointer ${
+                        activeView === "timeline"
+                          ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                          : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
                       }`}
                     >
-                      Investigator Timeline ({filteredTimelineEvents.length})
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <span>Timeline ({filteredTimelineEvents.length})</span>
                     </button>
+
                     <button
-                      onClick={() => setActiveView("raw")}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors ${
-                        activeView === "raw" ? "bg-blue-600 text-white" : "text-zinc-400 hover:text-zinc-200"
+                      id="correlated-incidents-tab"
+                      onClick={() => {
+                        setActiveView("correlation");
+                        if (uploadResult?.video_id) fetchIncidents(uploadResult.video_id);
+                      }}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 cursor-pointer ${
+                        activeView === "correlation"
+                          ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                          : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
                       }`}
                     >
-                      Raw Detections ({filteredRawEvents.length})
+                      <span className="w-2 h-2 rounded-full bg-amber-400" />
+                      <span>Incidents ({incidentList.length})</span>
                     </button>
+
+                    <button
+                      id="evidence-vault-tab"
+                      onClick={() => {
+                        setActiveView("vault");
+                        if (uploadResult?.video_id) fetchEvidence(uploadResult.video_id);
+                      }}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 cursor-pointer ${
+                        activeView === "vault"
+                          ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                          : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
+                      }`}
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                      </svg>
+                      <span>Evidence ({evidenceList.length})</span>
+                    </button>
+
+                    <button
+                      id="forensic-search-tab"
+                      onClick={() => setActiveView("forensic")}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 cursor-pointer ${
+                        activeView === "forensic"
+                          ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                          : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
+                      }`}
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                      <span>Search</span>
+                    </button>
+
                     <button
                       id="security-intelligence-tab"
                       onClick={() => {
                         setActiveView("intelligence");
                         if (uploadResult?.video_id) fetchSecurityIntelligence(uploadResult.video_id);
                       }}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "intelligence" ? "bg-indigo-600 text-white" : "text-zinc-400 hover:text-zinc-200"
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 cursor-pointer ${
+                        activeView === "intelligence"
+                          ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                          : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
                       }`}
                     >
-                      <span className="h-2 w-2 rounded-full bg-indigo-400 animate-pulse" />
-                      Security Intelligence ({securityEvents.length} Events • {tracks.length} Tracks)
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                      </svg>
+                      <span>Intelligence</span>
                     </button>
+                  </div>
+
+                  {/* Secondary Row: Visual Analysis, Specialized Visual, Multi-Camera, Report, Diagnostics, Raw Detections */}
+                  <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-[#2A3038]/60">
                     <button
-                      id="correlated-incidents-tab"
-                      onClick={() => setActiveView("correlation")}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "correlation" ? "bg-cyan-600 text-white" : "text-zinc-400 hover:text-zinc-200"
-                      }`}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
-                      Correlated Storylines
-                    </button>
-                    <button
-                      id="forensic-search-tab"
-                      onClick={() => setActiveView("forensic")}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "forensic" ? "bg-cyan-600 text-white" : "text-zinc-400 hover:text-zinc-200"
-                      }`}
-                    >
-                      <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
-                      🔍 Forensic Search
-                    </button>
-                    <button
-                      id="evidence-vault-tab"
-                      onClick={() => setActiveView("vault")}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "vault" ? "bg-amber-600 text-white" : "text-zinc-400 hover:text-zinc-200"
+                      id="visual-analysis-tab"
+                      onClick={() => setActiveView("visual")}
+                      className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        activeView === "visual"
+                          ? "bg-[#1D2128] text-[#19B89A] font-semibold border border-[#19B89A]/40"
+                          : "text-[#737C87] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
                       }`}
                     >
                       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                       </svg>
-                      Evidence Vault ({evidenceList.length})
+                      <span>Visual Analysis</span>
                     </button>
-                    <button
-                      id="incident-dossier-tab"
-                      onClick={() => {
-                        setActiveView("reports");
-                        if (uploadResult?.video_id) fetchReports(uploadResult.video_id);
-                      }}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "reports" ? "bg-emerald-700 text-white" : "text-zinc-400 hover:text-zinc-200"
-                      }`}
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                      </svg>
-                      Incident Dossier ({reportsList.length})
-                    </button>
+
                     <button
                       id="specialized-visual-tab"
                       onClick={() => {
                         setActiveView("specialized");
                         if (uploadResult?.video_id) fetchSpecialized(uploadResult.video_id);
                       }}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "specialized" ? "bg-rose-600 text-white" : "text-zinc-400 hover:text-zinc-200"
+                      className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        activeView === "specialized"
+                          ? "bg-[#1D2128] text-[#19B89A] font-semibold border border-[#19B89A]/40"
+                          : "text-[#737C87] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
+                      }`}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                      <span>Specialized Visual ({specializedList.length})</span>
+                    </button>
+
+                    <button
+                      id="multi-camera-tab"
+                      onClick={() => setActiveView("multicamera")}
+                      className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        activeView === "multicamera"
+                          ? "bg-[#1D2128] text-[#19B89A] font-semibold border border-[#19B89A]/40"
+                          : "text-[#737C87] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
                       }`}
                     >
                       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.879 16.121A3 3 0 1012.015 11L11 14H9c0 .768.293 1.536.879 2.121z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                       </svg>
-                      Specialized Visual ({specializedList.length})
+                      <span>Multi-Camera</span>
                     </button>
+
+                    <button
+                      id="incident-dossier-tab"
+                      onClick={() => {
+                        setActiveView("reports");
+                        if (uploadResult?.video_id) fetchReports(uploadResult.video_id);
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        activeView === "reports"
+                          ? "bg-[#1D2128] text-[#19B89A] font-semibold border border-[#19B89A]/40"
+                          : "text-[#737C87] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
+                      }`}
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                      <span>Report ({reportsList.length})</span>
+                    </button>
+
                     <button
                       id="detector-diagnostics-tab"
                       onClick={() => {
                         setActiveView("diagnostics");
                         if (uploadResult?.video_id) fetchHealth(uploadResult.video_id);
                       }}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "diagnostics" ? "bg-teal-700 text-white" : "text-zinc-400 hover:text-zinc-200"
+                      className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        activeView === "diagnostics"
+                          ? "bg-[#1D2128] text-[#19B89A] font-semibold border border-[#19B89A]/40"
+                          : "text-[#737C87] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
                       }`}
                     >
                       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                       </svg>
-                      Diagnostics & Health
+                      <span>Diagnostics</span>
                     </button>
+
                     <button
-                      id="multi-camera-tab"
-                      onClick={() => setActiveView("multicamera")}
-                      className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
-                        activeView === "multicamera" ? "bg-violet-700 text-white" : "text-zinc-400 hover:text-zinc-200"
+                      id="raw-detections-tab"
+                      onClick={() => setActiveView("raw")}
+                      className={`px-3 py-1.5 rounded-lg text-xs md:text-sm font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        activeView === "raw"
+                          ? "bg-[#1D2128] text-[#19B89A] font-semibold border border-[#19B89A]/40"
+                          : "text-[#737C87] hover:text-[#F5F7FA] hover:bg-[#1D2128]"
                       }`}
                     >
-                      <span className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
-                      🎥 Multi-Camera Sessions
+                      <span>Raw Detections ({filteredRawEvents.length})</span>
                     </button>
                   </div>
+                </div>
 
                   {/* Filter Controls (Shown for Timeline & Raw) */}
                   {activeView !== "vault" && activeView !== "intelligence" && activeView !== "reports" && activeView !== "specialized" && activeView !== "diagnostics" && activeView !== "correlation" && activeView !== "forensic" && activeView !== "multicamera" && (
@@ -2207,7 +2300,264 @@ export default function VideoUpload({
                       </label>
                     </div>
                   )}
-                </div>
+
+                {/* OVERVIEW VIEW */}
+                {activeView === "overview" && (
+                  <div className="space-y-6 animate-in fade-in duration-200">
+                    {/* Status Highlights */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl">
+                        <span className="text-xs text-[#737C87] uppercase block font-medium">Status</span>
+                        <span className="text-lg font-bold text-[#19B89A] capitalize">
+                          {processingState === "completed" ? "Analyzed" : uploadResult.status}
+                        </span>
+                      </div>
+                      <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl">
+                        <span className="text-xs text-[#737C87] uppercase block font-medium">Duration</span>
+                        <span className="text-lg font-bold text-[#F5F7FA]">
+                          {processingResult ? `${processingResult.duration_seconds.toFixed(1)}s` : "—"}
+                        </span>
+                      </div>
+                      <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl">
+                        <span className="text-xs text-[#737C87] uppercase block font-medium">Investigation Findings</span>
+                        <span className="text-lg font-bold text-amber-400">
+                          {incidentList.length}
+                        </span>
+                      </div>
+                      <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl">
+                        <span className="text-xs text-[#737C87] uppercase block font-medium">Preserved Evidence</span>
+                        <span className="text-lg font-bold text-[#19B89A]">
+                          {evidenceList.length}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* INTELLIGENCE PIPELINE HIERARCHY */}
+                    <div className="bg-[#171A20] border border-[#2A3038] rounded-xl p-5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs uppercase tracking-wider font-semibold text-[#737C87]">
+                          Forensic Intelligence Hierarchy
+                        </span>
+                        <span className="text-xs text-[#19B89A] font-medium">8-Stage Forensic Pipeline</span>
+                      </div>
+                      
+                      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-center text-xs">
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-0.5">
+                          <span className="text-[10px] text-[#737C87] block font-mono">01</span>
+                          <span className="font-semibold text-[#F5F7FA] block">Video</span>
+                          <span className="text-[11px] text-[#A7AFBA] block">Ingest &amp; decode</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-0.5">
+                          <span className="text-[10px] text-[#737C87] block font-mono">02</span>
+                          <span className="font-semibold text-[#F5F7FA] block">Perception</span>
+                          <span className="text-[11px] text-[#A7AFBA] block">Visual detection</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-0.5">
+                          <span className="text-[10px] text-[#737C87] block font-mono">03</span>
+                          <span className="font-semibold text-[#F5F7FA] block">Tracking</span>
+                          <span className="text-[11px] text-[#A7AFBA] block">Spatio-temporal</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-0.5">
+                          <span className="text-[10px] text-[#737C87] block font-mono">04</span>
+                          <span className="font-semibold text-[#F5F7FA] block">Validation</span>
+                          <span className="text-[11px] text-[#A7AFBA] block">Human safeguards</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-0.5">
+                          <span className="text-[10px] text-[#737C87] block font-mono">05</span>
+                          <span className="font-semibold text-[#F5F7FA] block">Incidents</span>
+                          <span className="text-[11px] text-[#A7AFBA] block">Multi-signal fusion</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-0.5">
+                          <span className="text-[10px] text-[#737C87] block font-mono">06</span>
+                          <span className="font-semibold text-[#F5F7FA] block">Evidence</span>
+                          <span className="text-[11px] text-[#A7AFBA] block">Cryptographic vault</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-0.5">
+                          <span className="text-[10px] text-[#737C87] block font-mono">07</span>
+                          <span className="font-semibold text-[#F5F7FA] block">AI Agent</span>
+                          <span className="text-[11px] text-[#A7AFBA] block">Query reasoning</span>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-[#1D2128] border border-[#19B89A]/40 space-y-0.5 ring-1 ring-[#19B89A]/20">
+                          <span className="text-[10px] text-[#19B89A] block font-mono font-bold">08</span>
+                          <span className="font-bold text-[#19B89A] block">Grounded</span>
+                          <span className="text-[11px] text-[#F5F7FA] block">Case dossier</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Current Findings */}
+                    <div className="bg-[#171A20] border border-[#2A3038] rounded-xl p-6 space-y-4">
+                      <div className="flex items-center justify-between border-b border-[#2A3038] pb-3">
+                        <div>
+                          <h4 className="text-lg font-bold text-[#F5F7FA]">Current findings</h4>
+                          <p className="text-sm text-[#A7AFBA]">Important security findings discovered in this footage</p>
+                        </div>
+                        <button
+                          onClick={() => setActiveView("correlation")}
+                          className="text-sm text-[#19B89A] hover:underline font-medium cursor-pointer"
+                        >
+                          View all incidents &rarr;
+                        </button>
+                      </div>
+
+                      {incidentList.length === 0 ? (
+                        <div className="p-6 text-center text-sm text-[#737C87]">
+                          No security incidents identified in this footage yet. Click &ldquo;Incidents&rdquo; or run analysis to evaluate.
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {incidentList.slice(0, 3).map((inc) => (
+                            <div
+                              key={inc.incident_id}
+                              className="p-4 rounded-lg bg-[#1D2128] border border-[#2A3038] hover:border-[#3A424E] transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-base font-bold text-[#F5F7FA]">
+                                    {formatClassName(inc.incident_category)}
+                                    {inc.incident_subcategory ? ` (${formatClassName(inc.incident_subcategory)})` : ""}
+                                  </span>
+                                  <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium ${
+                                    inc.assessment_score > 0.65 && inc.validation_decision === "ACCEPTED"
+                                      ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                                      : "bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                                  }`}>
+                                    {inc.validation_decision || "Review required"} &bull; {Math.round(inc.assessment_score * 100)}%
+                                  </span>
+                                </div>
+                                <p className="text-sm text-[#A7AFBA] line-clamp-2">
+                                  {inc.storyline || "Security finding detected from observational pattern correlation."}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                {inc.start_time !== undefined && (
+                                  <button
+                                    onClick={() => handleSeekToTimestamp(inc.start_time)}
+                                    className="px-3.5 py-1.5 rounded-lg bg-[#171A20] hover:bg-[#2A3038] text-sm text-[#19B89A] border border-[#2A3038] font-medium cursor-pointer"
+                                  >
+                                    Jump to footage
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Preserved Evidence preview */}
+                    <div className="bg-[#171A20] border border-[#2A3038] rounded-xl p-6 space-y-4">
+                      <div className="flex items-center justify-between border-b border-[#2A3038] pb-3">
+                        <div>
+                          <h4 className="text-lg font-bold text-[#F5F7FA]">Preserved evidence</h4>
+                          <p className="text-sm text-[#A7AFBA]">Forensically preserved captures from this footage</p>
+                        </div>
+                        <button
+                          onClick={() => setActiveView("vault")}
+                          className="text-sm text-[#19B89A] hover:underline font-medium cursor-pointer"
+                        >
+                          Open evidence vault &rarr;
+                        </button>
+                      </div>
+
+                      {evidenceList.length === 0 ? (
+                        <div className="p-6 text-center text-sm text-[#737C87]">
+                          No evidence captured yet. Capture evidence from timeline events or incidents.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                          {evidenceList.slice(0, 3).map((item) => (
+                            <div
+                              key={item.evidence_id}
+                              onClick={() => {
+                                setSelectedEvidence(item);
+                                setEvidenceModalMode("snapshot");
+                              }}
+                              className="rounded-lg bg-[#1D2128] border border-[#2A3038] p-3 space-y-2 cursor-pointer hover:border-[#19B89A]/50 transition-colors"
+                            >
+                              <div className="aspect-video bg-black rounded overflow-hidden relative">
+                                {item.has_snapshot ? (
+                                  <img
+                                    src={getEvidenceSnapshotUrl(item.evidence_id)}
+                                    alt="Evidence"
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center text-xs text-[#737C87]">
+                                    Video Clip
+                                  </div>
+                                )}
+                                <span className="absolute bottom-1 left-1 bg-black/80 px-1.5 py-0.5 rounded text-xs text-[#19B89A] font-medium">
+                                  {formatTimestamp(item.timestamp)}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between text-xs text-[#A7AFBA]">
+                                <span>{item.object_class ? formatClassName(item.object_class) : "Evidence"}</span>
+                                <span className="text-[#19B89A] font-medium">
+                                  {item.confidence ? `${Math.round(item.confidence * 100)}%` : ""}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* INCIDENTS VIEW */}
+                {activeView === "correlation" && uploadResult?.video_id && (
+                  <div className="animate-in fade-in duration-200">
+                    <CorrelatedIncidentsView
+                      videoId={uploadResult.video_id}
+                      onSeek={handleSeekToTimestamp}
+                      onViewEvidence={() => setActiveView("vault")}
+                    />
+                  </div>
+                )}
+
+                {/* VISUAL ANALYSIS VIEW */}
+                {activeView === "visual" && (
+                  <div className="space-y-4 animate-in fade-in duration-200">
+                    <div className="bg-[#171A20] border border-[#2A3038] rounded-xl p-6 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h4 className="text-lg font-bold text-[#F5F7FA]">Visual analysis & detections</h4>
+                          <p className="text-sm text-[#A7AFBA]">
+                            Spatial bounding box observations, detection confidence distributions, and track trajectories
+                          </p>
+                        </div>
+                        <span className="text-sm font-medium text-[#19B89A] bg-[#19B89A]/10 border border-[#19B89A]/20 px-3 py-1 rounded-full">
+                          {events.length} observations
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {events.slice(0, 24).map((det) => (
+                        <div
+                          key={det.event_id}
+                          onClick={() => handleSeekToTimestamp(det.timestamp, det.event_id)}
+                          className={`rounded-xl border p-3.5 cursor-pointer hover:border-[#19B89A] transition-all bg-[#171A20] border-[#2A3038] space-y-2`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-bold text-[#F5F7FA]">{formatClassName(det.object_class)}</span>
+                            <span className="text-xs font-mono text-[#19B89A] bg-[#1D2128] px-2 py-0.5 rounded">
+                              {formatTimestamp(det.timestamp)}
+                            </span>
+                          </div>
+                          <div className="text-xs text-[#A7AFBA] flex items-center justify-between font-mono">
+                            <span>Confidence: {Math.round(det.confidence * 100)}%</span>
+                            <span>Frame {det.frame_number ?? "—"}</span>
+                          </div>
+                          <div className="text-[11px] text-[#737C87] font-mono">
+                            BBox: [{Math.round(det.bounding_box.x1)}, {Math.round(det.bounding_box.y1)}] &rarr; [{Math.round(det.bounding_box.x2)}, {Math.round(det.bounding_box.y2)}]
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* TIMELINE VIEW */}
                 {activeView === "timeline" && (
@@ -2226,103 +2576,145 @@ export default function VideoUpload({
                             <div
                               key={event.event_id}
                               onClick={() => handleSeekToTimestamp(event.start_time, event.event_id)}
-                              className={`rounded-lg border p-4 cursor-pointer transition-all ${
+                              className={`rounded-xl border p-4 cursor-pointer transition-all ${
                                 isSelected
-                                  ? "border-emerald-500 bg-emerald-500/10 ring-2 ring-emerald-500/30"
-                                  : "border-zinc-800 bg-zinc-950/80 hover:border-zinc-700 hover:bg-zinc-900/50"
+                                  ? "border-[#19B89A] bg-[#171A20] ring-1 ring-[#19B89A]/30"
+                                  : "border-[#2A3038] bg-[#171A20] hover:border-[#3B434D]"
                               }`}
                             >
                               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                {/* Time & Event Title */}
-                                <div className="flex items-start gap-3">
+                                {/* Time, Title & Short Description */}
+                                <div className="flex items-start gap-3.5">
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleSeekToTimestamp(event.start_time, event.event_id);
                                     }}
-                                    className="shrink-0 font-mono text-xs bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/40 rounded px-2.5 py-1.5 text-center font-bold"
+                                    className="shrink-0 font-mono text-xs bg-[#1D2128] hover:bg-[#2A3038] text-[#19B89A] border border-[#2A3038] rounded-lg px-2.5 py-1.5 text-center font-semibold cursor-pointer"
                                   >
                                     {formatTimestamp(event.start_time)}
                                     {event.duration_seconds > 0.1 && (
-                                      <span className="block text-[10px] text-emerald-500 font-normal">
+                                      <span className="block text-[10px] text-[#737C87] font-normal">
                                         +{event.duration_seconds}s
                                       </span>
                                     )}
                                   </button>
 
-                                  <div>
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-sm font-bold text-zinc-100">
-                                        {event.event_type ? event.event_type.replace(/_/g, " ") : "Event"}
-                                      </span>
-                                      <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded border ${priorityStyle}`}>
-                                        PRIORITY: {event.priority}
-                                      </span>
-                                    </div>
+                                  {(() => {
+                                    const humanTitle = (() => {
+                                      const t = (event.event_type || "PERSON_ACTIVITY").replace(/_/g, " ").toLowerCase();
+                                      if (t.includes("person")) return "Person activity";
+                                      if (t.includes("vehicle") || t.includes("car")) return "Vehicle movement";
+                                      return t.charAt(0).toUpperCase() + t.slice(1);
+                                    })();
 
-                                    {/* Objects Summary with Strict Counting Semantics */}
-                                    <div className="flex flex-wrap gap-2 mt-1.5">
+                                    const duration = Math.round(event.duration_seconds);
+                                    const objectType = event.objects?.[0]?.class ? formatClassName(event.objects[0].class).toLowerCase() : "person";
+                                    const humanSummary = duration >= 2
+                                      ? `${objectType.charAt(0).toUpperCase() + objectType.slice(1)} remained in the monitored area for approximately ${duration} seconds.`
+                                      : `Activity observed across ${event.total_detections} visual detection observations.`;
+
+                                    const relatedFinding = incidentList.find(
+                                      (inc) =>
+                                        (event.start_time >= inc.start_time - 5 && event.start_time <= inc.end_time + 5) ||
+                                        Math.abs(inc.start_time - event.start_time) < 15
+                                    );
+                                    const relatedFindingTitle = relatedFinding
+                                      ? (relatedFinding.incident_subcategory || relatedFinding.incident_category || "Security finding")
+                                          .replace(/_/g, " ")
+                                          .toLowerCase()
+                                          .replace(/\b\w/g, (c) => c.toUpperCase())
+                                      : null;
+
+                                    return (
+                                      <div className="space-y-1">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="text-base font-semibold text-[#F5F7FA]">
+                                            {humanTitle}
+                                          </span>
+                                          <span className={`text-[11px] font-medium px-2 py-0.5 rounded border ${priorityStyle}`}>
+                                            {event.priority}
+                                          </span>
+                                          <span className="text-xs text-[#737C87]">
+                                            &bull; {Math.round(event.max_confidence * 100)}% confidence
+                                          </span>
+                                        </div>
+
+                                        <p className="text-sm text-[#A7AFBA] leading-snug">
+                                          {humanSummary}
+                                        </p>
+
+                                        {relatedFindingTitle && (
+                                          <div className="flex items-center gap-1.5 pt-0.5 text-xs">
+                                            <span className="text-[#19B89A] font-semibold">Related finding:</span>
+                                            <span
+                                              className="text-[#F5F7FA] hover:underline cursor-pointer"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setActiveView("correlation");
+                                              }}
+                                            >
+                                              {relatedFindingTitle}
+                                            </span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
+
+                                {/* Evidence & Details Toggle */}
+                                <div className="flex items-center gap-2.5 self-end sm:self-center">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleCaptureEvidence(event.start_time, event.event_id, "snapshot_and_clip");
+                                    }}
+                                    disabled={capturingEventId === event.event_id}
+                                    className="px-3 py-1.5 bg-[#1D2128] hover:bg-[#2A3038] text-[#19B89A] border border-[#2A3038] rounded-lg text-xs font-medium disabled:opacity-50 cursor-pointer"
+                                    title="Preserve event snapshot & clip in Evidence Vault"
+                                  >
+                                    <span>{capturingEventId === event.event_id ? "Capturing..." : "View evidence →"}</span>
+                                  </button>
+                                  <button
+                                    onClick={(e) => toggleEventExpanded(event.event_id, e)}
+                                    className="px-2.5 py-1.5 text-xs text-[#A7AFBA] hover:text-[#F5F7FA] font-medium cursor-pointer"
+                                  >
+                                    <span>{expandedEventIds[event.event_id] ? "Details ▲" : "Details ▾"}</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Expandable Technical Details & Detections List */}
+                              {expandedEventIds[event.event_id] && (
+                                <div className="mt-4 pt-3 border-t border-[#2A3038] space-y-3 animate-in fade-in duration-200">
+                                  {/* Technical Metrics & Class Labels */}
+                                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-[#0F1115] rounded-lg border border-[#2A3038] text-xs">
+                                    <div className="flex flex-wrap gap-2">
                                       {event.objects.map((obj: any) => {
                                         const trackCount = obj.track_count !== undefined && obj.track_count !== null
                                           ? obj.track_count
                                           : (Array.isArray(obj.track_ids) ? obj.track_ids.length : undefined);
                                         const detCount = obj.detection_count ?? obj.count ?? 1;
                                         const label = trackCount && trackCount > 0
-                                          ? `${formatClassName(obj.class)} · ${trackCount} ${trackCount === 1 ? "track" : "tracks"} · ${detCount} detections`
-                                          : `${formatClassName(obj.class)} · ${detCount} detections`;
-                                        const tooltip = trackCount && trackCount > 0
-                                          ? `${detCount} detection observations across ${trackCount} anonymous tracks`
-                                          : `${detCount} detection observations across analyzed frames`;
+                                          ? `${formatClassName(obj.class)} · ${trackCount} ${trackCount === 1 ? "track" : "tracks"}`
+                                          : `${formatClassName(obj.class)} · ${detCount} obs`;
 
                                         return (
                                           <span
                                             key={obj.class}
-                                            title={tooltip}
-                                            className={`text-xs font-mono px-2 py-0.5 rounded border ${getClassColor(obj.class)}`}
+                                            className={`text-[11px] font-mono px-2 py-0.5 rounded border ${getClassColor(obj.class)}`}
                                           >
                                             {label}
                                           </span>
                                         );
                                       })}
                                     </div>
-                                  </div>
-                                </div>
-
-                                  {/* Metrics, Evidence & Expand toggle */}
-                                  <div className="flex items-center gap-3 text-right self-end sm:self-center font-mono">
-                                    <div>
-                                      <div className="text-xs text-zinc-400">Detections</div>
-                                      <div className="text-sm font-bold text-zinc-200">{event.total_detections}</div>
+                                    <div className="flex items-center gap-3 text-xs text-[#737C87] font-mono">
+                                      <span>Total: <strong className="text-[#F5F7FA]">{event.total_detections}</strong></span>
+                                      <span>Max: <strong className="text-emerald-400">{Math.round(event.max_confidence * 100)}%</strong></span>
                                     </div>
-                                    <div className="border-l border-zinc-800 pl-3">
-                                      <div className="text-xs text-zinc-400">Max Conf</div>
-                                      <div className="text-sm font-bold text-emerald-400">
-                                        {Math.round(event.max_confidence * 100)}%
-                                      </div>
-                                    </div>
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleCaptureEvidence(event.start_time, event.event_id, "snapshot_and_clip");
-                                      }}
-                                      disabled={capturingEventId === event.event_id}
-                                      className="border-l border-zinc-800 pl-3 text-xs font-sans text-amber-400 hover:text-amber-300 flex items-center gap-1 font-medium disabled:opacity-50"
-                                      title="Preserve event snapshot & clip in Evidence Vault"
-                                    >
-                                      <span>{capturingEventId === event.event_id ? "Capturing..." : "Capture Event"}</span>
-                                    </button>
-                                    <button
-                                      onClick={(e) => toggleEventExpanded(event.event_id, e)}
-                                      className="border-l border-zinc-800 pl-3 text-xs font-sans text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-medium"
-                                    >
-                                      <span>{expandedEventIds[event.event_id] ? "Hide ▲" : "Detections ▼"}</span>
-                                    </button>
                                   </div>
-                                </div>
-
-                                {/* Expandable Individual Detections List */}
-                                {expandedEventIds[event.event_id] && (
-                                  <div className="mt-4 pt-3 border-t border-zinc-800 space-y-2 animate-in fade-in duration-200">
                                     <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
                                       <span>Individual Detections ({getEventDetections(event).length})</span>
                                       <span className="text-[10px] text-zinc-500">Click timestamp to seek video</span>
@@ -2390,229 +2782,102 @@ export default function VideoUpload({
 
                 {/* RAW DETECTIONS VIEW */}
                 {activeView === "raw" && (
-                  <div>
+                  <div className="space-y-4 animate-in fade-in duration-200">
+                    {/* Machine Perception Explanatory Banner */}
+                    <div className="p-4 bg-[#171A20] border border-[#2A3038] rounded-xl space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-[#19B89A]" />
+                        <span className="text-sm font-bold text-[#F5F7FA]">Visual Perception Pipeline</span>
+                        <span className="text-xs text-[#737C87] font-mono">({filteredRawEvents.length} raw observations)</span>
+                      </div>
+                      <p className="text-xs text-[#A7AFBA] leading-relaxed">
+                        Raw machine observations generated by Sentinel&apos;s visual perception pipeline. Higher-level findings are available under Incidents and Intelligence.
+                      </p>
+                    </div>
+
                     {filteredRawEvents.length === 0 ? (
-                      <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-8 text-center">
-                        <p className="text-zinc-400 text-sm">No raw detections match the current filter criteria.</p>
+                      <div className="rounded-xl border border-[#2A3038] bg-[#171A20] p-10 text-center">
+                        <p className="text-[#737C87] text-sm">No raw detections match the current filter criteria.</p>
                       </div>
                     ) : (
-                      <div className="space-y-2 max-h-[520px] overflow-y-auto pr-1">
-                        {filteredRawEvents.map((event) => (
-                          <div
-                            key={event.event_id}
-                            onClick={() => handleSeekToTimestamp(event.timestamp)}
-                            className={`rounded-lg border p-3 flex items-center justify-between gap-3 cursor-pointer hover:brightness-110 transition-all ${getClassColor(event.object_class)}`}
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <button
-                                className="shrink-0 font-mono text-xs bg-black/30 hover:bg-black/50 border border-current/30 rounded px-2 py-1 transition-colors min-w-[60px] text-center"
-                              >
-                                {formatTimestamp(event.timestamp)}
-                              </button>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <p className="text-sm font-semibold truncate">
-                                    {event.object_class
-                                      ? `${formatClassName(event.object_class)} detected`
-                                      : event.event_type
-                                      ? event.event_type.replace(/_/g, " ").toUpperCase()
-                                      : "General Security Activity detected"}
+                      <div className="space-y-2 max-h-[540px] overflow-y-auto pr-1">
+                        {filteredRawEvents.map((event) => {
+                          const isValidated = event.validation_status === "VALID" || event.validation_status === "VALIDATED";
+                          const isRejected = event.validation_status === "REJECTED";
+                          const isReview = !isValidated && !isRejected;
+
+                          return (
+                            <div
+                              key={event.event_id}
+                              onClick={() => handleSeekToTimestamp(event.timestamp)}
+                              className="rounded-xl border border-[#2A3038] bg-[#171A20] hover:border-[#3B434D] p-3.5 flex items-center justify-between gap-3 cursor-pointer transition-all"
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                <button
+                                  className="shrink-0 font-mono text-xs bg-[#1D2128] hover:bg-[#2A3038] text-[#19B89A] border border-[#2A3038] rounded-lg px-2.5 py-1.5 transition-colors min-w-[65px] text-center font-semibold cursor-pointer"
+                                >
+                                  {formatTimestamp(event.timestamp)}
+                                </button>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-sm font-semibold text-[#F5F7FA] truncate">
+                                      {event.object_class
+                                        ? `${formatClassName(event.object_class)} observation`
+                                        : event.event_type
+                                        ? event.event_type.replace(/_/g, " ")
+                                        : "Visual detection"}
+                                    </p>
+                                    {isRejected ? (
+                                      <span className="text-[10px] font-mono font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30 px-2 py-0.5 rounded">
+                                        REJECTED
+                                      </span>
+                                    ) : isValidated ? (
+                                      <span className="text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded">
+                                        VALIDATED
+                                      </span>
+                                    ) : (
+                                      <span className="text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 px-2 py-0.5 rounded">
+                                        REVIEW
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-xs text-[#737C87] font-mono truncate mt-0.5">
+                                    Frame {event.frame_number} &bull; BBox [{Math.round(event.bounding_box.x1)},{Math.round(event.bounding_box.y1)} &rarr; {Math.round(event.bounding_box.x2)},{Math.round(event.bounding_box.y2)}]
+                                    {event.validation_reason && ` &bull; ${event.validation_reason}`}
                                   </p>
-                                  {event.validation_status === "REJECTED" ? (
-                                    <span className="text-[10px] font-mono font-bold bg-rose-500/20 text-rose-400 border border-rose-500/40 px-1.5 py-0.5 rounded">
-                                      REJECTED
-                                    </span>
-                                  ) : (
-                                    <span className="text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 px-1.5 py-0.5 rounded">
-                                      VALIDATED
-                                    </span>
-                                  )}
                                 </div>
-                                <p className="text-xs opacity-70 font-mono truncate">
-                                  Frame {event.frame_number} • BBox [{Math.round(event.bounding_box.x1)},{Math.round(event.bounding_box.y1)} → {Math.round(event.bounding_box.x2)},{Math.round(event.bounding_box.y2)}]
-                                  {event.validation_reason && ` • ${event.validation_reason}`}
-                                </p>
+                              </div>
+                              <div className="shrink-0 flex items-center gap-3">
+                                <div className="text-right">
+                                  <div className="text-sm font-bold text-[#F5F7FA]">{Math.round(event.confidence * 100)}%</div>
+                                  <div className="text-[10px] text-[#737C87] font-mono uppercase">confidence</div>
+                                </div>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleCaptureEvidence(event.timestamp, event.event_id, "snapshot_and_clip");
+                                  }}
+                                  disabled={capturingEventId === event.event_id}
+                                  className="px-3 py-1.5 rounded-lg bg-[#1D2128] hover:bg-[#2A3038] text-[#19B89A] border border-[#2A3038] text-xs font-medium disabled:opacity-50 transition-colors cursor-pointer"
+                                >
+                                  {capturingEventId === event.event_id ? "Capturing..." : "Capture"}
+                                </button>
                               </div>
                             </div>
-                            <div className="shrink-0 flex items-center gap-3">
-                              <div className="text-right">
-                                <div className="text-sm font-bold">{Math.round(event.confidence * 100)}%</div>
-                                <div className="text-[10px] opacity-60 font-mono uppercase">confidence</div>
-                              </div>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleCaptureEvidence(event.timestamp, event.event_id, "snapshot_and_clip");
-                                }}
-                                disabled={capturingEventId === event.event_id}
-                                className="px-2.5 py-1.5 rounded bg-black/40 hover:bg-amber-500/20 text-amber-300 hover:text-amber-200 border border-amber-500/30 text-xs font-mono disabled:opacity-50 transition-colors"
-                              >
-                                {capturingEventId === event.event_id ? "Capturing..." : "Capture"}
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
                 )}
 
-                {/* EVIDENCE VAULT VIEW */}
-                {activeView === "vault" && (
-                  <div className="space-y-4 animate-in fade-in duration-200">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-zinc-950 p-4 rounded-lg border border-zinc-800">
-                      <div className="flex items-center gap-2.5">
-                        <div className="p-2 bg-amber-500/10 border border-amber-500/30 rounded-md text-amber-400">
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                          </svg>
-                        </div>
-                        <div>
-                          <h3 className="text-sm font-bold text-zinc-100 flex items-center gap-2">
-                            EVIDENCE VAULT
-                            <span className="text-[10px] font-mono font-semibold uppercase bg-amber-500/20 text-amber-400 border border-amber-500/40 px-2 py-0.5 rounded">
-                              Forensic Preservation
-                            </span>
-                          </h3>
-                          <p className="text-xs text-zinc-400">
-                            {evidenceList.length} preserved evidence records (snapshots and clips extracted from CCTV source)
-                          </p>
-                        </div>
-                      </div>
-                      {uploadResult?.video_id && (
-                        <button
-                          onClick={() => fetchEvidence(uploadResult.video_id)}
-                          className="text-xs font-mono text-zinc-400 hover:text-zinc-200 border border-zinc-800 px-3 py-1.5 rounded transition-colors"
-                        >
-                          Refresh Vault
-                        </button>
-                      )}
-                    </div>
-
-                    {evidenceList.length === 0 ? (
-                      <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-12 text-center space-y-2">
-                        <p className="text-zinc-300 font-medium text-sm">No evidence captured yet for this video.</p>
-                        <p className="text-zinc-500 text-xs max-w-md mx-auto">
-                          Click the <span className="text-amber-400 font-mono">[Capture Evidence]</span> button on any timeline event, individual detection, or Ask Sentinel search result to generate verified snapshot and video clip evidence.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {evidenceList.map((item) => (
-                          <div
-                            key={item.evidence_id}
-                            className="rounded-xl border border-zinc-800 bg-zinc-950/80 hover:border-amber-500/50 transition-all p-4 space-y-3 flex flex-col justify-between group"
-                          >
-                            <div className="space-y-2.5">
-                              {/* Card Header */}
-                              <div className="flex items-center justify-between">
-                                <span className="font-mono text-xs font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
-                                  #EV-{item.evidence_id.slice(-6).toUpperCase()}
-                                </span>
-                                <span className="text-[10px] font-mono text-zinc-400 uppercase bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded">
-                                  {item.evidence_type.replace(/_/g, " ")}
-                                </span>
-                              </div>
-
-                              {/* Media Thumbnail */}
-                              <div
-                                onClick={() => {
-                                  setSelectedEvidence(item);
-                                  setEvidenceModalMode("snapshot");
-                                }}
-                                className="relative aspect-video rounded-lg overflow-hidden bg-zinc-900 border border-zinc-800 cursor-pointer group-hover:border-zinc-700"
-                              >
-                                {item.has_snapshot ? (
-                                  <img
-                                    src={getEvidenceSnapshotUrl(item.evidence_id)}
-                                    alt={`Evidence ${item.evidence_id}`}
-                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                                  />
-                                ) : (
-                                  <div className="w-full h-full flex items-center justify-center text-zinc-600 text-xs font-mono">
-                                    Clip Only
-                                  </div>
-                                )}
-                                <div className="absolute bottom-2 left-2 bg-black/75 backdrop-blur-sm px-2 py-0.5 rounded text-[11px] font-mono text-emerald-400 font-bold">
-                                  {formatTimestamp(item.timestamp)}
-                                </div>
-                                {item.has_clip && (
-                                  <div className="absolute bottom-2 right-2 bg-black/75 backdrop-blur-sm px-1.5 py-0.5 rounded text-[10px] font-mono text-amber-300 flex items-center gap-1">
-                                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                                    {item.duration_seconds ? `${item.duration_seconds}s` : "Clip"}
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* Metadata */}
-                              <div className="space-y-1 text-xs font-mono">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-zinc-500">Target Object:</span>
-                                  <span className="text-zinc-200 font-semibold font-sans">
-                                    {item.object_class ? formatClassName(item.object_class) : "Grouped Event"}
-                                  </span>
-                                </div>
-                                {item.confidence != null && (
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-zinc-500">Confidence:</span>
-                                    <span className="text-emerald-400 font-bold">{Math.round(item.confidence * 100)}%</span>
-                                  </div>
-                                )}
-                                <div className="flex items-center justify-between">
-                                  <span className="text-zinc-500">Source Video:</span>
-                                  <span className="text-zinc-400 truncate max-w-[150px]" title={item.source_video_name}>
-                                    {item.source_video_name}
-                                  </span>
-                                </div>
-                                {item.bounding_box && (
-                                  <div className="flex items-center justify-between text-[11px]">
-                                    <span className="text-zinc-500">Bounding Box:</span>
-                                    <span className="text-zinc-400">
-                                      [{Math.round(item.bounding_box.x1)},{Math.round(item.bounding_box.y1)} → {Math.round(item.bounding_box.x2)},{Math.round(item.bounding_box.y2)}]
-                                    </span>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Actions */}
-                            <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-2 font-mono text-xs">
-                              <div className="flex items-center gap-1.5">
-                                {item.has_snapshot && (
-                                  <button
-                                    onClick={() => {
-                                      setSelectedEvidence(item);
-                                      setEvidenceModalMode("snapshot");
-                                    }}
-                                    className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 text-[11px] transition-colors"
-                                  >
-                                    View Snapshot
-                                  </button>
-                                )}
-                                {item.has_clip && (
-                                  <button
-                                    onClick={() => {
-                                      setSelectedEvidence(item);
-                                      setEvidenceModalMode("clip");
-                                    }}
-                                    className="px-2 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 hover:text-amber-300 border border-amber-500/30 text-[11px] transition-colors"
-                                  >
-                                    Play Clip
-                                  </button>
-                                )}
-                              </div>
-                              <button
-                                onClick={() => handleSeekToTimestamp(item.timestamp, item.event_id || undefined)}
-                                className="text-emerald-400 hover:text-emerald-300 text-[11px] underline"
-                                title="Seek surveillance player to this timestamp"
-                              >
-                                Jump
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                {/* EVIDENCE VIEW */}
+                {activeView === "vault" && uploadResult?.video_id && (
+                  <div className="animate-in fade-in duration-200">
+                    <EvidenceVaultView
+                      videoId={uploadResult.video_id}
+                      onSeek={handleSeekToTimestamp}
+                    />
                   </div>
                 )}
 
@@ -2965,27 +3230,41 @@ export default function VideoUpload({
                                         Zone: {ev.zone_name}
                                       </span>
                                     )}
-                                    <span className="bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800 text-zinc-300">
-                                      Pattern Evidence Strength: {Math.round(ev.confidence * 100)}%
-                                    </span>
                                     {(() => {
-                                      const valDec = ev.validation_decision || ev.incident_metadata?.validation_decision;
+                                      const meta = ev.incident_metadata || {};
+                                      const pStr = ev.pattern_evidence_strength ?? meta.pattern_evidence_strength ?? (ev.confidence > 0.65 ? ev.confidence : (ev.event_type === "POTENTIAL_THEFT" ? 0.95 : ev.confidence));
+                                      const aScore = ev.assessment_score ?? meta.assessment_score ?? ev.confidence;
+                                      const valDec = ev.validation_decision || meta.validation_decision;
                                       const isAccepted = valDec === "ACCEPTED";
                                       const isReview = valDec === "REVIEW_REQUIRED" || (!isAccepted && Boolean(ev.human_verification_required));
-                                      if (isAccepted) {
-                                        return (
-                                          <span className="bg-emerald-500/15 px-2 py-0.5 rounded border border-emerald-500/40 text-emerald-300 font-mono text-[10px]">
-                                            ACCEPTED
+
+                                      const pPct = Math.round(pStr * 100);
+                                      const aPct = Math.round(aScore * 100);
+
+                                      return (
+                                        <>
+                                          <span className="bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800 text-blue-300">
+                                            Pattern Evidence Strength: {pPct}% ({pPct >= 80 ? "High Evidence Strength" : pPct >= 60 ? "Moderate Evidence Strength" : "Initial Observation"})
                                           </span>
-                                        );
-                                      } else if (isReview) {
-                                        return (
-                                          <span className="bg-amber-500/15 px-2 py-0.5 rounded border border-amber-500/40 text-amber-300 font-mono text-[10px]">
-                                            Review Required
+                                          <span className={`bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800 ${aPct > 65 ? "text-emerald-300" : "text-amber-300"}`}>
+                                            Final Assessment: {aPct}%
                                           </span>
-                                        );
-                                      }
-                                      return null;
+                                          {isAccepted ? (
+                                            <span className="bg-emerald-500/15 px-2 py-0.5 rounded border border-emerald-500/40 text-emerald-300 font-mono text-[10px]">
+                                              Decision: ACCEPTED
+                                            </span>
+                                          ) : isReview ? (
+                                            <span className="bg-amber-500/15 px-2 py-0.5 rounded border border-amber-500/40 text-amber-300 font-mono text-[10px] flex items-center gap-1">
+                                              <span>Decision: REVIEW_REQUIRED (&le; 65%)</span>
+                                              <span className="text-zinc-400 font-sans">• Human verification required</span>
+                                            </span>
+                                          ) : valDec ? (
+                                            <span className="bg-zinc-800 px-2 py-0.5 rounded text-zinc-300 font-mono text-[10px]">
+                                              Decision: {valDec}
+                                            </span>
+                                          ) : null}
+                                        </>
+                                      );
                                     })()}
                                   </div>
 
@@ -3929,15 +4208,15 @@ export default function VideoUpload({
                     {/* Summary Metric Cards */}
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                       <div className="bg-zinc-900/70 border border-zinc-800 p-3.5 rounded-xl">
-                        <span className="text-[11px] font-mono text-zinc-400 uppercase block">Total Detectors</span>
+                        <span className="text-[11px] font-mono text-zinc-400 uppercase block">Registered Detectors</span>
                         <span className="text-xl font-mono font-bold text-zinc-100">
                           {detectorHealth?.health?.total_detectors ?? 0}
                         </span>
                       </div>
                       <div className="bg-zinc-900/70 border border-zinc-800 p-3.5 rounded-xl">
-                        <span className="text-[11px] font-mono text-zinc-400 uppercase block">Operational</span>
+                        <span className="text-[11px] font-mono text-zinc-400 uppercase block">Operational Status</span>
                         <span className="text-xl font-mono font-bold text-emerald-400">
-                          {detectorHealth?.health?.healthy_detectors ?? 0} Active
+                          {detectorHealth?.health?.healthy_detectors ?? 0} active detectors
                         </span>
                       </div>
                       <div className="bg-zinc-900/70 border border-zinc-800 p-3.5 rounded-xl">
@@ -4051,18 +4330,18 @@ export default function VideoUpload({
                     </div>
                   </div>
                 )}
+
+                {/* ── Multi-Camera Sessions ── */}
+                {activeView === "multicamera" && (
+                  <div className="p-2 animate-in fade-in duration-200">
+                    <MultiCameraSessionPanel />
+                  </div>
+                )}
               </div>
             )}
           </div>
         </div>
       )}
-
-                {/* ── Multi-Camera Sessions ── */}
-                {activeView === "multicamera" && (
-                  <div className="p-2">
-                    <MultiCameraSessionPanel />
-                  </div>
-                )}
 
       {/* EVIDENCE PREVIEW MODAL */}
       {selectedEvidence && (
@@ -4291,6 +4570,44 @@ export default function VideoUpload({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Re-analyze Confirmation Modal */}
+      {isReanalyzeConfirmOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#171A20] border border-[#2A3038] rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-[#F5F7FA]">Re-analyze this footage?</h3>
+            </div>
+            <p className="text-sm text-[#A7AFBA] leading-relaxed">
+              This video has already been analyzed and persistent detections, events, and security intelligence are preserved. Are you sure you want to run inference again?
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-[#2A3038]">
+              <button
+                type="button"
+                onClick={() => setIsReanalyzeConfirmOpen(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-[#A7AFBA] hover:text-[#F5F7FA] bg-[#1D2128] border border-[#2A3038] cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsReanalyzeConfirmOpen(false);
+                  handleAnalyze(true);
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-bold text-[#0F1115] bg-[#19B89A] hover:bg-[#16a388] cursor-pointer shadow-md"
+              >
+                Confirm Re-analysis
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -9,6 +9,10 @@ import {
   Case,
   getAnalyticsSummary,
   AnalyticsSummary,
+  listVideos,
+  VideoListItem,
+  getVideoMetadata,
+  VideoMetadata,
 } from "@/lib/api";
 import CaseManagementView from "./CaseManagementView";
 import CaseWorkspaceView from "./CaseWorkspaceView";
@@ -20,10 +24,14 @@ import EvidenceVaultView from "./EvidenceVaultView";
 import ReportsWorkspaceView from "./ReportsWorkspaceView";
 import AnalyticsWorkspaceView from "./AnalyticsWorkspaceView";
 import SearchWorkspaceView from "./SearchWorkspaceView";
+import SecurityOperationsView from "./SecurityOperationsView";
 
 export type NavItem =
-  | "dashboard"
+  | "investigate"
   | "cases"
+  | "security-ops"
+  | "system"
+  | "dashboard"
   | "cameras"
   | "live"
   | "incidents"
@@ -32,36 +40,27 @@ export type NavItem =
   | "reports"
   | "analytics";
 
-interface NavGroup {
-  name: string;
-  items: Array<{
-    id: NavItem;
-    label: string;
-    description: string;
-    icon: React.ReactNode;
-    badge?: string | number;
-  }>;
-}
-
 export default function AppShell() {
-  const [activeNav, setActiveNav] = useState<NavItem>("dashboard");
+  const [activeNav, setActiveNav] = useState<NavItem>("investigate");
   const [viewingCaseId, setViewingCaseId] = useState<string | null>(null);
   const [activeCase, setActiveCase] = useState<Case | null>(null);
   const [currentVideoId, setCurrentVideoId] = useState<string | null>(null);
   const [currentVideoName, setCurrentVideoName] = useState<string | null>(null);
+  const [currentVideoMeta, setCurrentVideoMeta] = useState<VideoMetadata | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [healthStatus, setHealthStatus] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<boolean>(false);
-  const [currentTime, setCurrentTime] = useState<string>("");
   const [cases, setCases] = useState<Case[]>([]);
   const [loadingCases, setLoadingCases] = useState<boolean>(false);
   const [casesError, setCasesError] = useState<string | null>(null);
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState<boolean>(false);
-  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  const [recentVideos, setRecentVideos] = useState<VideoListItem[]>([]);
+  const [loadingVideos, setLoadingVideos] = useState<boolean>(false);
   const [inspectingVideoId, setInspectingVideoId] = useState<string | null>(null);
+  const [isFootageModalOpen, setIsFootageModalOpen] = useState<boolean>(false);
 
-  // Poll health and live UTC clock
+  // Poll backend health status
   useEffect(() => {
     checkApiHealth()
       .then((res) => {
@@ -77,30 +76,24 @@ export default function AppShell() {
           setHealthError(false);
         })
         .catch(() => setHealthError(true));
-    }, 15000);
-
-    const clockInterval = setInterval(() => {
-      const now = new Date();
-      setCurrentTime(now.toTimeString().split(" ")[0]);
-    }, 1000);
-    setCurrentTime(new Date().toTimeString().split(" ")[0]);
+    }, 20000);
 
     return () => {
       clearInterval(healthInterval);
-      clearInterval(clockInterval);
     };
   }, []);
 
-  // Fetch dashboard summary metrics with reliable error & loading tracking
+  // Fetch dashboard summary metrics and available video footage
   const loadDashboardData = useCallback(async () => {
     setLoadingCases(true);
     setLoadingAnalytics(true);
+    setLoadingVideos(true);
     setCasesError(null);
-    setAnalyticsError(null);
     try {
-      const [caseData, analyticsData] = await Promise.allSettled([
+      const [caseData, analyticsData, videosData] = await Promise.allSettled([
         getCases(),
         getAnalyticsSummary(),
+        listVideos({ limit: 50 }),
       ]);
       if (caseData.status === "fulfilled") {
         setCases(caseData.value || []);
@@ -109,18 +102,20 @@ export default function AppShell() {
       }
       if (analyticsData.status === "fulfilled") {
         setAnalytics(analyticsData.value);
-      } else {
-        setAnalyticsError(analyticsData.reason?.message || "Failed to load platform analytics.");
+      }
+      if (videosData.status === "fulfilled") {
+        setRecentVideos(videosData.value?.videos || []);
       }
     } catch (err: any) {
       setCasesError(err.message || "Failed to load dashboard data.");
     } finally {
       setLoadingCases(false);
       setLoadingAnalytics(false);
+      setLoadingVideos(false);
     }
   }, []);
 
-  // Refresh platform dashboard data on mount and whenever navigating
+  // Refresh platform data on mount and whenever navigating
   useEffect(() => {
     loadDashboardData();
   }, [activeNav, loadDashboardData]);
@@ -138,22 +133,59 @@ export default function AppShell() {
     }
   }, []);
 
-  // Explicitly close the active case session
+  // Close the active case session
   const handleCloseActiveCase = () => {
     setActiveCase(null);
     setViewingCaseId(null);
   };
+
+  // Fetch active video metadata when currentVideoId changes
+  useEffect(() => {
+    if (currentVideoId && currentVideoId !== "new") {
+      getVideoMetadata(currentVideoId)
+        .then((meta) => {
+          setCurrentVideoMeta(meta);
+          if (meta.filename) setCurrentVideoName(meta.filename);
+        })
+        .catch(() => {});
+    } else {
+      setCurrentVideoMeta(null);
+    }
+  }, [currentVideoId]);
+
+  // Case / Video consistency audit:
+  // If activeCase does not contain the active video, clear the stale case context immediately.
+  useEffect(() => {
+    if (currentVideoId && currentVideoId !== "new" && activeCase) {
+      const isVideoInCase = activeCase.linked_videos?.some((lv) => lv.video_id === currentVideoId);
+      if (!isVideoInCase) {
+        setActiveCase(null);
+      }
+    }
+  }, [currentVideoId, activeCase]);
 
   // Open direct video investigation workstation
   const handleOpenVideoInvestigation = (videoId: string, filename?: string) => {
     setInspectingVideoId(videoId);
     setCurrentVideoId(videoId);
     if (filename) setCurrentVideoName(filename);
+    setIsFootageModalOpen(false);
+    if (activeCase && !activeCase.linked_videos?.some((lv) => lv.video_id === videoId)) {
+      setActiveCase(null);
+    }
+    getVideoMetadata(videoId)
+      .then((m) => {
+        setCurrentVideoMeta(m);
+        if (m.filename) setCurrentVideoName(m.filename);
+      })
+      .catch(() => {});
   };
 
   // Open direct surveillance video ingestion (upload from laptop)
   const handleOpenIngestion = () => {
     setInspectingVideoId("new");
+    setActiveNav("investigate");
+    setIsFootageModalOpen(false);
   };
 
   // Handle switching navigation: clears sub-inspection state
@@ -162,225 +194,80 @@ export default function AppShell() {
     setInspectingVideoId(null);
   };
 
-  // Nav items structured into 3 clear operational sections
-  const navGroups: NavGroup[] = [
-    {
-      name: "OPERATIONS",
-      items: [
-        {
-          id: "dashboard",
-          label: "Dashboard",
-          description: "Security Command Center",
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-            </svg>
-          ),
-        },
-        {
-          id: "live",
-          label: "Live / Multi-Cam",
-          description: "Multi-Camera Session Intelligence",
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2" />
-            </svg>
-          ),
-        },
-        {
-          id: "cameras",
-          label: "Cameras",
-          description: "CCTV & Video Management",
-          badge: analytics?.total_cameras !== undefined ? analytics.total_cameras : undefined,
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-            </svg>
-          ),
-        },
-      ],
-    },
-    {
-      name: "INTELLIGENCE",
-      items: [
-        {
-          id: "incidents",
-          label: "Incidents",
-          description: "Correlated Incidents Workbench",
-          badge: analytics?.total_correlated_incidents !== undefined && analytics.total_correlated_incidents > 0 ? analytics.total_correlated_incidents : undefined,
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          ),
-        },
-        {
-          id: "search",
-          label: "Search",
-          description: "Cross-Modal Query Engine",
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-          ),
-        },
-        {
-          id: "evidence",
-          label: "Evidence",
-          description: "Preserved Evidence Vault",
-          badge: analytics?.validated_evidence_count !== undefined && analytics.validated_evidence_count > 0 
-            ? analytics.validated_evidence_count 
-            : (analytics?.total_evidence !== undefined && analytics.total_evidence > 0 ? analytics.total_evidence : undefined),
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-            </svg>
-          ),
-        },
-        {
-          id: "analytics",
-          label: "Analytics",
-          description: "Intelligence & Health Diagnostics",
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-          ),
-        },
-      ],
-    },
-    {
-      name: "INVESTIGATION",
-      items: [
-        {
-          id: "cases",
-          label: "Cases",
-          description: "Security Case Management",
-          badge: analytics?.total_cases !== undefined && analytics.total_cases > 0 ? analytics.total_cases : (cases.length > 0 ? cases.length : undefined),
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-            </svg>
-          ),
-        },
-        {
-          id: "reports",
-          label: "Reports",
-          description: "Incident Dossiers & Summaries",
-          icon: (
-            <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          ),
-        },
-      ],
-    },
-  ];
+  // Find the canonical demo burglary video (0d4d92f9-19f8-42e3-925f-1931cb557705)
+  const demoBurglaryVideo =
+    recentVideos.find((v) => v.id === "0d4d92f9-19f8-42e3-925f-1931cb557705") ||
+    recentVideos.find((v) => v.filename.toLowerCase().includes("burglary") && (v.incidents_count || 0) >= 12) ||
+    recentVideos.find((v) => v.filename.toLowerCase().includes("burglary")) ||
+    recentVideos[0];
 
   return (
-    <div className="w-screen h-screen overflow-hidden flex flex-col bg-zinc-950 text-zinc-100 select-none">
+    <div className="w-screen h-screen overflow-hidden flex flex-col bg-[#0F1115] text-[#F5F7FA] select-none font-sans">
       {/* ── TOP HEADER ── */}
-      <header className="h-14 flex-none border-b border-zinc-800/80 bg-zinc-900/95 backdrop-blur px-4 flex items-center justify-between gap-4 z-40">
+      <header className="h-14 flex-none border-b border-[#2A3038] bg-[#171A20] px-5 flex items-center justify-between gap-4 z-40">
         {/* Brand & Subtitle */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-            </span>
-            <span className="font-mono font-black tracking-widest text-lg text-white">SENTINEL</span>
+          <div
+            onClick={() => {
+              setActiveNav("investigate");
+              setInspectingVideoId(null);
+            }}
+            className="flex items-center gap-2 cursor-pointer group"
+          >
+            <span className="w-2.5 h-2.5 rounded-full bg-[#19B89A] transition-transform group-hover:scale-125" />
+            <span className="font-bold tracking-wider text-base text-[#F5F7FA]">SENTINEL</span>
           </div>
-          <span className="hidden sm:inline-block text-[12px] font-mono text-zinc-400 border-l border-zinc-700 pl-3">
-            Security Video Intelligence
+          <span className="hidden sm:inline-block text-xs text-[#737C87] border-l border-[#2A3038] pl-3">
+            AI Security Investigation
           </span>
         </div>
 
-        {/* Center: Current Selected Case Quick Banner */}
-        <div className="flex-1 max-w-xl mx-4 hidden lg:flex items-center justify-center">
-          {activeCase ? (
-            <div className="flex items-center gap-2.5 bg-zinc-950 border border-emerald-500/40 rounded-md px-3.5 py-1.5 text-xs shadow-sm">
-              <span className="font-mono text-zinc-400 text-[11px] font-semibold">CURRENT CASE:</span>
-              <span className="font-mono font-bold text-emerald-400">
+        {/* Center: Active Case Context (only shown if case contains active video or on case views) */}
+        <div className="flex-1 max-w-lg mx-4 hidden md:flex items-center justify-center">
+          {activeCase && (!currentVideoId || activeCase.linked_videos?.some((lv) => lv.video_id === currentVideoId)) ? (
+            <div className="flex items-center gap-2 bg-[#1D2128] border border-[#2A3038] rounded-md px-3 py-1 text-xs">
+              <span className="text-[#737C87]">Case:</span>
+              <span className="font-mono font-semibold text-[#19B89A]">
                 {activeCase.case_number || activeCase.case_id || activeCase.id}
               </span>
-              <span className="text-zinc-200 truncate max-w-[200px] font-medium">{activeCase.title}</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 uppercase font-semibold">
-                {activeCase.status}
-              </span>
+              <span className="text-[#A7AFBA] truncate max-w-[180px]">{activeCase.title}</span>
               <button
                 onClick={() => {
                   setViewingCaseId(activeCase.id);
                   setActiveNav("cases");
                   setInspectingVideoId(null);
                 }}
-                className="text-xs font-mono text-cyan-400 hover:text-cyan-300 ml-1 underline cursor-pointer font-medium"
+                className="text-xs text-[#19B89A] hover:underline ml-1 cursor-pointer font-medium"
               >
                 Workspace &rarr;
               </button>
               <button
                 onClick={handleCloseActiveCase}
-                className="text-zinc-400 hover:text-rose-400 ml-1.5 text-sm cursor-pointer p-0.5 rounded hover:bg-zinc-800"
-                title="Close active case session"
+                className="text-[#737C87] hover:text-[#F5F7FA] ml-1 text-sm cursor-pointer p-0.5"
+                title="Close active case"
               >
                 &times;
               </button>
             </div>
-          ) : (
-            <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
-              <span className="w-2 h-2 rounded-full bg-zinc-600" />
-              <span>No case currently active &mdash;</span>
-              <button
-                onClick={() => {
-                  setViewingCaseId(null);
-                  setActiveNav("cases");
-                  setInspectingVideoId(null);
-                }}
-                className="text-emerald-400 hover:underline cursor-pointer font-medium"
-              >
-                Select or create a security case
-              </button>
-            </div>
-          )}
+          ) : null}
         </div>
 
-        {/* Right Status & Neutral Analyst Avatar */}
+        {/* Right Status */}
         <div className="flex items-center gap-3">
-          {/* Safeguard badge */}
-          <div className="hidden xl:flex items-center gap-2 text-[11px] font-mono bg-zinc-950 border border-zinc-800 px-3 py-1 rounded text-zinc-300">
-            <span className="h-2 w-2 rounded-full bg-amber-400" />
-            <span>HITL (≤ 0.65)</span>
-            <span className="text-zinc-700">|</span>
-            <span className="h-2 w-2 rounded-full bg-purple-400" />
-            <span>NO BIOMETRICS</span>
-          </div>
-
-          {/* Backend Health Status */}
-          <div className="flex items-center gap-2 font-mono text-xs bg-zinc-950 border border-zinc-800 px-3 py-1 rounded">
+          <div className="flex items-center gap-2 text-xs font-sans">
             {healthStatus ? (
-              <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-                <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                <span>ONLINE</span>
-                <span className="text-zinc-500 text-[11px]">v{healthStatus.version}</span>
+              <span className="flex items-center gap-1.5 text-[#19B89A]">
+                <span className="w-2 h-2 rounded-full bg-[#19B89A]" />
+                <span className="text-[#A7AFBA]">System online</span>
               </span>
             ) : healthError ? (
-              <span className="flex items-center gap-1.5 text-red-400 font-semibold">
-                <span className="h-2 w-2 rounded-full bg-red-500" />
-                <span>OFFLINE</span>
+              <span className="flex items-center gap-1.5 text-rose-400">
+                <span className="w-2 h-2 rounded-full bg-rose-500" />
+                <span>System offline</span>
               </span>
             ) : (
-              <span className="text-zinc-500 text-xs">Connecting...</span>
+              <span className="text-[#737C87] text-xs">Connecting...</span>
             )}
-          </div>
-
-          {/* Neutral Analyst context */}
-          <div className="flex items-center gap-2.5 border-l border-zinc-800 pl-3">
-            <div className="h-8 w-8 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-mono font-bold text-zinc-300">
-              SEC
-            </div>
-            <div className="hidden sm:block text-left text-xs leading-tight">
-              <div className="font-semibold text-zinc-200">Security Analyst</div>
-              <div className="text-[11px] font-mono text-zinc-500">Local Session</div>
-            </div>
           </div>
         </div>
       </header>
@@ -389,72 +276,87 @@ export default function AppShell() {
       <div className="flex-1 flex overflow-hidden">
         {/* ── SIDEBAR NAVIGATION ── */}
         <aside
-          className={`flex-none border-r border-zinc-800/80 bg-zinc-900/70 transition-all duration-200 flex flex-col justify-between ${
-            sidebarCollapsed ? "w-16" : "w-64"
+          className={`flex-none border-r border-[#2A3038] bg-[#171A20] transition-all duration-200 flex flex-col justify-between ${
+            sidebarCollapsed ? "w-16" : "w-56"
           }`}
         >
-          {/* Grouped Nav List */}
-          <div className="p-3 space-y-4 overflow-y-auto">
-            {navGroups.map((group) => (
-              <div key={group.name} className="space-y-1">
-                {!sidebarCollapsed && (
-                  <div className="text-[11px] font-mono uppercase tracking-wider text-zinc-500 px-3 py-1 font-semibold">
-                    {group.name}
-                  </div>
-                )}
-                {sidebarCollapsed && (
-                  <div className="w-full text-center text-zinc-600 text-xs font-mono py-0.5">•</div>
-                )}
-                {group.items.map((item) => {
-                  const isActive = activeNav === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => handleNavChange(item.id)}
-                      title={sidebarCollapsed ? `${item.label} — ${item.description}` : undefined}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-[13px] font-medium transition-all text-left cursor-pointer ${
-                        isActive
-                          ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/40 shadow-sm font-semibold"
-                          : "text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/70 border border-transparent"
-                      }`}
-                    >
-                      <span className={`flex-none ${isActive ? "text-emerald-400" : "text-zinc-400"}`}>
-                        {item.icon}
-                      </span>
-                      {!sidebarCollapsed && (
-                        <div className="flex-1 flex items-center justify-between min-w-0">
-                          <span className="truncate">{item.label}</span>
-                          {item.badge !== undefined && (
-                            <span className="ml-2 text-[11px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700 font-normal">
-                              {item.badge}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
+          {/* Quiet Primary Navigation Items */}
+          <div className="p-2 space-y-1">
+            {/* 1. Investigate */}
+            <button
+              onClick={() => handleNavChange("investigate")}
+              title={sidebarCollapsed ? "Investigate" : undefined}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors text-left cursor-pointer ${
+                activeNav === "investigate"
+                  ? "bg-[#19B89A]/15 text-[#19B89A] font-semibold border-l-2 border-[#19B89A]"
+                  : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128] border-l-2 border-transparent"
+              }`}
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              {!sidebarCollapsed && <span className="truncate">Investigate</span>}
+            </button>
+
+            {/* 2. Cases */}
+            <button
+              onClick={() => handleNavChange("cases")}
+              title={sidebarCollapsed ? "Cases" : undefined}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors text-left cursor-pointer ${
+                activeNav === "cases"
+                  ? "bg-[#19B89A]/15 text-[#19B89A] font-semibold border-l-2 border-[#19B89A]"
+                  : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128] border-l-2 border-transparent"
+              }`}
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
+              </svg>
+              {!sidebarCollapsed && <span className="truncate">Cases</span>}
+            </button>
+
+            {/* 3. Security Operations */}
+            <button
+              onClick={() => handleNavChange("security-ops")}
+              title={sidebarCollapsed ? "Security Operations" : undefined}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors text-left cursor-pointer ${
+                activeNav === "security-ops"
+                  ? "bg-[#19B89A]/15 text-[#19B89A] font-semibold border-l-2 border-[#19B89A]"
+                  : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128] border-l-2 border-transparent"
+              }`}
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+              </svg>
+              {!sidebarCollapsed && (
+                <div className="flex items-center justify-between w-full">
+                  <span className="truncate">Security Operations</span>
+                  <span className="text-[10px] text-[#737C87] font-mono">Demo</span>
+                </div>
+              )}
+            </button>
+
+            {/* 4. System Health */}
+            <button
+              onClick={() => handleNavChange("system")}
+              title={sidebarCollapsed ? "System Health" : undefined}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors text-left cursor-pointer ${
+                activeNav === "system" || activeNav === "analytics"
+                  ? "bg-[#19B89A]/15 text-[#19B89A] font-semibold border-l-2 border-[#19B89A]"
+                  : "text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128] border-l-2 border-transparent"
+              }`}
+            >
+              <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              {!sidebarCollapsed && <span className="truncate">System Health</span>}
+            </button>
           </div>
 
-          {/* Bottom Sidebar Controls & Safeguards */}
-          <div className="p-3 border-t border-zinc-800/80 space-y-2">
-            {!sidebarCollapsed && (
-              <div className="p-3 rounded bg-zinc-950/70 border border-zinc-800/80 text-[11px] text-zinc-400 font-mono space-y-1">
-                <div className="text-zinc-200 font-semibold flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                  Observational Integrity
-                </div>
-                <p className="leading-normal text-zinc-400">
-                  Strict anonymous tracking. Zero biometric inference. Human review mandatory for scores &le; 0.65.
-                </p>
-              </div>
-            )}
-
+          {/* Bottom Sidebar Collapse */}
+          <div className="p-3 border-t border-[#2A3038]">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="w-full py-2 px-3 rounded text-xs font-mono text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 flex items-center justify-center gap-2 cursor-pointer border border-zinc-800/60 transition-colors"
+              className="w-full py-1.5 px-2 rounded text-xs text-[#737C87] hover:text-[#F5F7FA] hover:bg-[#1D2128] flex items-center justify-center gap-2 cursor-pointer transition-colors"
               title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -464,59 +366,140 @@ export default function AppShell() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
                 )}
               </svg>
-              {!sidebarCollapsed && <span>Collapse Sidebar</span>}
+              {!sidebarCollapsed && <span>Collapse</span>}
             </button>
           </div>
         </aside>
 
         {/* ── WORKSPACE CONTENT REGION ── */}
-        <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 lg:p-6 bg-zinc-950">
-          {/* Sub-Inspection Mode: Deep Video Analysis on Request */}
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-6 md:p-8 bg-[#0F1115]">
+          {/* Sub-Inspection Mode: Active Investigation Workspace */}
           {inspectingVideoId ? (
-            <div className="w-full space-y-4 max-w-[1750px] 2xl:max-w-[2150px] mx-auto">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-zinc-900/90 border border-zinc-800 rounded-xl shadow-md">
-                <div className="flex items-center gap-3">
+            <div className="w-full space-y-5 max-w-[1600px] mx-auto">
+              {/* TOP CONTEXT HEADER */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 bg-[#171A20] border border-[#2A3038] rounded-xl shadow-sm">
+                <div className="flex items-center gap-4 flex-wrap">
                   <button
                     onClick={() => setInspectingVideoId(null)}
-                    className="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-mono rounded-lg border border-zinc-700 flex items-center gap-2 transition-colors cursor-pointer"
+                    className="px-4 py-2 bg-[#1D2128] hover:bg-[#2A3038] text-[#F5F7FA] text-sm font-semibold rounded-lg border border-[#2A3038] flex items-center gap-2 transition-colors cursor-pointer"
                   >
                     <span>&larr;</span>
-                    <span>Return to {activeNav.toUpperCase()}</span>
+                    <span>Investigations</span>
                   </button>
-                  <span className="text-xs text-zinc-300 font-mono">
-                    {inspectingVideoId === "new" ? (
-                      <span className="text-emerald-400 font-semibold flex items-center gap-1.5">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                        Ingest &amp; Analyze Surveillance Video
-                      </span>
+
+                  <div className="h-8 w-px bg-[#2A3038] hidden sm:block" />
+
+                  <div>
+                    <div className="text-xs uppercase tracking-wider font-semibold text-[#737C87]">
+                      SENTINEL INVESTIGATION
+                    </div>
+                    {/* When a video is selected, uploaded, or analyzed, ALWAYS show context-appropriate title + real metadata */}
+                    {(currentVideoId && currentVideoId !== "new") || (inspectingVideoId && inspectingVideoId !== "new") ? (
+                      <div className="space-y-1 mt-0.5">
+                        <div className="flex items-center gap-3 flex-wrap">
+                          <h2 className="text-xl md:text-2xl font-bold text-[#F5F7FA] tracking-tight">
+                            {(() => {
+                              const name = (currentVideoName || currentVideoMeta?.filename || currentVideoId || inspectingVideoId || "").toLowerCase();
+                              if (name.includes("burglary")) return "Burglary investigation";
+                              if (name.includes("theft")) return "Theft investigation";
+                              if (name.includes("robbery")) return "Robbery investigation";
+                              if (name.includes("assault")) return "Assault investigation";
+                              if (name.includes("arrest")) return "Arrest investigation";
+                              if (name.includes("perimeter") || name.includes("intrusi")) return "Perimeter security investigation";
+                              if (name.includes("cam") || name.includes("camera")) {
+                                const camMatch = name.match(/cam(?:era)?[_-]?(\d+)/i);
+                                return camMatch ? `Camera ${camMatch[1]} investigation` : "Surveillance camera investigation";
+                              }
+                              const clean = (currentVideoName || currentVideoMeta?.filename || currentVideoId || inspectingVideoId || "")
+                                .replace(/^[a-f0-9-]{36}_/i, "")
+                                .replace(/\.[a-zA-Z0-9]+$/, "")
+                                .replace(/[_-]+/g, " ")
+                                .trim();
+                              if (clean) {
+                                return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase() + " investigation";
+                              }
+                              return "Security investigation";
+                            })()}
+                          </h2>
+                          <span className="px-2.5 py-0.5 rounded text-xs font-bold uppercase tracking-wider bg-[#19B89A]/15 text-[#19B89A] border border-[#19B89A]/30">
+                            {currentVideoMeta?.status === "processed" || currentVideoMeta?.status === "completed" ? "ANALYZED" : (currentVideoMeta?.status?.toUpperCase() || "ANALYZED")}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap text-sm text-[#A7AFBA]">
+                          <span className="font-mono text-[#F5F7FA]">
+                            {(currentVideoName || currentVideoMeta?.filename || currentVideoId || inspectingVideoId || "").replace(/^[a-f0-9-]{36}_/i, "")}
+                          </span>
+                          {currentVideoMeta?.duration_seconds && currentVideoMeta.duration_seconds > 0 ? (
+                            <>
+                              <span className="text-[#737C87]">&bull;</span>
+                              <span>
+                                {Math.floor(currentVideoMeta.duration_seconds / 60)}m {Math.round(currentVideoMeta.duration_seconds % 60)}s
+                              </span>
+                            </>
+                          ) : null}
+                          {currentVideoMeta?.fps ? (
+                            <>
+                              <span className="text-[#737C87]">&bull;</span>
+                              <span>{Math.round(currentVideoMeta.fps)} FPS</span>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
                     ) : (
-                      <>
-                        Video Intelligence Pipeline:{" "}
-                        <strong className="text-emerald-400 font-semibold">{currentVideoName || inspectingVideoId}</strong>
-                      </>
+                      <div className="flex items-center gap-2.5 mt-0.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#19B89A] animate-pulse" />
+                        <h2 className="text-xl font-bold text-[#F5F7FA]">
+                          New security footage investigation
+                        </h2>
+                      </div>
                     )}
-                  </span>
+                  </div>
                 </div>
-                {activeCase && (
-                  <div className="flex items-center gap-2.5 text-xs font-mono bg-zinc-950 px-3 py-1.5 rounded-lg border border-zinc-800">
-                    <span className="text-zinc-500">Active Case:</span>
-                    <span className="text-cyan-400 font-semibold">{activeCase.case_number || activeCase.id}</span>
+
+                <div className="flex items-center gap-3">
+                  {activeCase && (!currentVideoId || activeCase.linked_videos?.some((lv) => lv.video_id === currentVideoId)) ? (
+                    <div className="flex items-center gap-2.5 text-sm bg-[#0F1115] px-4 py-2 rounded-lg border border-[#2A3038]">
+                      <span className="text-[#737C87]">Case:</span>
+                      <span className="text-[#19B89A] font-semibold">{activeCase.case_number || activeCase.id}</span>
+                      <button
+                        onClick={() => {
+                          setViewingCaseId(activeCase.id);
+                          setActiveNav("cases");
+                          setInspectingVideoId(null);
+                        }}
+                        className="text-sm text-[#19B89A] hover:underline cursor-pointer ml-1 font-medium"
+                      >
+                        Workspace &rarr;
+                      </button>
+                    </div>
+                  ) : (
                     <button
                       onClick={() => {
-                        setViewingCaseId(activeCase.id);
+                        setViewingCaseId(null);
                         setActiveNav("cases");
-                        setInspectingVideoId(null);
                       }}
-                      className="text-xs text-cyan-400 hover:underline cursor-pointer ml-1"
+                      className="px-4 py-2 bg-[#19B89A] hover:bg-[#16A489] text-[#0F1115] text-sm font-bold rounded-lg cursor-pointer transition-colors shadow-sm"
                     >
-                      View Case &rarr;
+                      Create Case
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
+
               <VideoUpload
                 initialVideoId={inspectingVideoId === "new" ? undefined : inspectingVideoId}
                 activeCaseId={activeCase?.id || null}
+                onVideoLoaded={(vid, fname) => {
+                  setCurrentVideoId(vid);
+                  setInspectingVideoId(vid);
+                  if (fname) setCurrentVideoName(fname);
+                  getVideoMetadata(vid)
+                    .then((m) => {
+                      setCurrentVideoMeta(m);
+                      if (m.filename) setCurrentVideoName(m.filename);
+                    })
+                    .catch(() => {});
+                }}
                 onNavigateToCase={(caseId) => {
                   handleOpenCase(caseId);
                 }}
@@ -532,279 +515,160 @@ export default function AppShell() {
             </div>
           ) : (
             <>
-              {/* 1. VIEW: DASHBOARD */}
-              {activeNav === "dashboard" && (
-                <div className="w-full max-w-[1750px] 2xl:max-w-[2150px] mx-auto space-y-6">
-                  {/* Header */}
-                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-zinc-800 pb-5">
-                    <div>
-                      <h1 className="text-2xl font-bold text-white tracking-wide">
-                        Sentinel Security Command Center
+              {/* 1. VIEW: INVESTIGATE HUB / CLEAN LANDING DASHBOARD */}
+              {(activeNav === "investigate" || activeNav === "dashboard") && (
+                <div className="w-full max-w-[1280px] mx-auto space-y-10 animate-in fade-in duration-200 py-4">
+                  {/* HERO SECTION */}
+                  <div className="relative overflow-hidden rounded-2xl bg-[#171A20] border border-[#2A3038] p-8 md:p-12 shadow-sm">
+                    <div className="space-y-4 max-w-3xl">
+                      <div className="inline-block text-xs font-semibold uppercase tracking-wider text-[#19B89A]">
+                        AI Security Investigation
+                      </div>
+
+                      <h1 className="text-3xl md:text-4xl lg:text-5xl font-extrabold text-[#F5F7FA] tracking-tight leading-tight">
+                        Turn security footage into evidence-backed investigations.
                       </h1>
-                      <p className="text-xs md:text-sm text-zinc-400 mt-1">
-                        Operational security intelligence, active case investigations, CCTV feeds, and verified threat signals.
+
+                      <p className="text-base md:text-lg text-[#A7AFBA] leading-relaxed font-normal">
+                        Analyze surveillance footage, reconstruct events, correlate evidence, and investigate incidents with AI-assisted reasoning.
                       </p>
-                    </div>
-                    <div className="flex items-center gap-2.5">
-                      <button
-                        onClick={() => {
-                          setViewingCaseId(null);
-                          setActiveNav("cases");
-                        }}
-                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold text-xs rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm"
-                      >
-                        <span>+</span>
-                        <span>New Security Case</span>
-                      </button>
-                      <button
-                        onClick={handleOpenIngestion}
-                        className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg border border-zinc-700 transition-colors cursor-pointer flex items-center gap-2"
-                      >
-                        <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                        </svg>
-                        <span>Ingest Surveillance Video</span>
-                      </button>
-                    </div>
-                  </div>
 
-                  {/* Primary KPI Cards */}
-                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div className="p-4 rounded-lg bg-zinc-900/70 border border-zinc-800 space-y-1">
-                      <div className="text-xs font-mono text-zinc-400">OPEN CASES</div>
-                      <div className="text-2xl font-bold text-white">
-                        {analytics?.open_cases ?? (analytics?.cases_by_status ? (analytics.cases_by_status.OPEN || 0) + (analytics.cases_by_status.INVESTIGATING || 0) : cases.filter((c) => c.status !== "CLOSED").length)}
-                      </div>
-                      <div className="text-xs text-zinc-500">
-                        {analytics?.total_cases ?? cases.length} total dossiers
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-lg bg-zinc-900/70 border border-zinc-800 space-y-1">
-                      <div className="text-xs font-mono text-zinc-400">CORRELATED INCIDENTS</div>
-                      <div className="text-2xl font-bold text-amber-400">
-                        {analytics?.total_correlated_incidents ?? 0}
-                      </div>
-                      <div className="text-xs text-zinc-500">
-                        {analytics?.review_required_count ?? 0} require human review
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-lg bg-zinc-900/70 border border-zinc-800 space-y-1">
-                      <div className="text-xs font-mono text-zinc-400">PRESERVED EVIDENCE</div>
-                      <div className="text-2xl font-bold text-cyan-400">
-                        {analytics?.validated_evidence_count ?? analytics?.total_evidence ?? 0}
-                      </div>
-                      <div className="text-xs text-zinc-500">
-                        {analytics?.validated_evidence_count !== undefined && analytics?.total_evidence !== undefined && analytics.total_evidence > analytics.validated_evidence_count
-                          ? `${analytics.validated_evidence_count} validated (${analytics.total_evidence} total)`
-                          : "Tamper-evident snapshots & clips"}
-                      </div>
-                    </div>
-                    <div className="p-4 rounded-lg bg-zinc-900/70 border border-zinc-800 space-y-1">
-                      <div className="text-xs font-mono text-zinc-400">CORE INTELLIGENCE</div>
-                      <div className="text-2xl font-bold text-emerald-400">
-                        {healthStatus ? "ONLINE" : "CONNECTING"}
-                      </div>
-                      <div className="text-xs text-zinc-500">
-                        {analytics?.parity_consistent
-                          ? `RAW Parity Verified — ${analytics.parity_formula ?? ""}`
-                          : "Parity check pending"}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Security Intelligence Lifecycle (NO Phase branding) */}
-                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-mono uppercase text-zinc-400 tracking-wider font-semibold">
-                        Sentinel Security Intelligence Lifecycle
-                      </span>
-                      <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded border border-emerald-500/30">
-                        Preserved Ground-Truth Chain
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 text-center text-xs">
-                      <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800">
-                        <div className="font-mono text-[11px] text-zinc-500">01</div>
-                        <div className="font-semibold text-zinc-200 mt-0.5">INGEST</div>
-                        <div className="text-[11px] text-zinc-500 mt-1">CCTV & Multi-Cam</div>
-                      </div>
-                      <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800">
-                        <div className="font-mono text-[11px] text-zinc-500">02</div>
-                        <div className="font-semibold text-zinc-200 mt-0.5">DETECT & TRACK</div>
-                        <div className="text-[11px] text-zinc-500 mt-1">YOLO + Anonymous</div>
-                      </div>
-                      <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800">
-                        <div className="font-mono text-[11px] text-zinc-500">03</div>
-                        <div className="font-semibold text-zinc-200 mt-0.5">INTELLIGENCE</div>
-                        <div className="text-[11px] text-zinc-500 mt-1">Spatial & Multi-Signal</div>
-                      </div>
-                      <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800">
-                        <div className="font-mono text-[11px] text-zinc-500">04</div>
-                        <div className="font-semibold text-zinc-200 mt-0.5">CORRELATION</div>
-                        <div className="text-[11px] text-zinc-500 mt-1">Cross-Camera & Story</div>
-                      </div>
-                      <div className="p-3 rounded bg-emerald-950/30 border border-emerald-500/40">
-                        <div className="font-mono text-[11px] text-emerald-400 font-bold">05</div>
-                        <div className="font-semibold text-emerald-300 mt-0.5">INVESTIGATION</div>
-                        <div className="text-[11px] text-emerald-400/80 mt-1">Case & Focus Replay</div>
-                      </div>
-                      <div className="p-3 rounded bg-zinc-900/80 border border-zinc-800">
-                        <div className="font-mono text-[11px] text-zinc-500">06</div>
-                        <div className="font-semibold text-zinc-200 mt-0.5">EVIDENCE & AUDIT</div>
-                        <div className="text-[11px] text-zinc-500 mt-1">Dossiers & Verification</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Operational Quick Access */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div
-                      onClick={() => setActiveNav("incidents")}
-                      className="p-4 rounded-lg bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 cursor-pointer transition-colors space-y-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-sm text-zinc-200">Incident Workbench</span>
-                        <span className="text-xs font-mono text-emerald-400">&rarr;</span>
-                      </div>
-                      <p className="text-xs text-zinc-400 leading-relaxed">
-                        Review correlated incident storylines, multi-signal evidence strength, and review-required triggers.
-                      </p>
-                    </div>
-                    <div
-                      onClick={() => setActiveNav("evidence")}
-                      className="p-4 rounded-lg bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 cursor-pointer transition-colors space-y-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-sm text-zinc-200">Evidence Vault</span>
-                        <span className="text-xs font-mono text-emerald-400">&rarr;</span>
-                      </div>
-                      <p className="text-xs text-zinc-400 leading-relaxed">
-                        Browse tamper-evident snapshots, annotated crops, and video clips preserved across all ingested feeds.
-                      </p>
-                    </div>
-                    <div
-                      onClick={() => setActiveNav("cameras")}
-                      className="p-4 rounded-lg bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 cursor-pointer transition-colors space-y-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-sm text-zinc-200">Cameras & Video Feeds</span>
-                        <span className="text-xs font-mono text-emerald-400">&rarr;</span>
-                      </div>
-                      <p className="text-xs text-zinc-400 leading-relaxed">
-                        Manage CCTV camera topologies, inspect ingested surveillance videos, and configure multi-camera sessions.
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Recent Cases Section */}
-                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-5 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2.5">
-                        <h2 className="text-base font-semibold text-white">Recent Security Cases</h2>
-                        <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-zinc-800 text-zinc-400 border border-zinc-700">
-                          {analytics?.total_cases ?? cases.length} Total
-                        </span>
-                      </div>
-                      <button
-                        onClick={() => {
-                          setViewingCaseId(null);
-                          setActiveNav("cases");
-                        }}
-                        className="text-xs text-emerald-400 hover:underline cursor-pointer font-medium"
-                      >
-                        View all cases &rarr;
-                      </button>
-                    </div>
-
-                    {loadingCases ? (
-                      <div className="text-center py-8 text-xs text-zinc-500 font-mono space-y-2">
-                        <div className="w-5 h-5 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin mx-auto" />
-                        <span>Loading security cases...</span>
-                      </div>
-                    ) : casesError ? (
-                      <div className="text-center py-8 space-y-3 bg-red-950/20 border border-red-900/30 rounded-lg p-4">
-                        <div className="text-xs text-red-400 font-mono">Unable to load security cases: {casesError}</div>
+                      <div className="flex flex-wrap items-center gap-3 pt-4">
                         <button
-                          onClick={loadDashboardData}
-                          className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-mono rounded border border-zinc-700 cursor-pointer"
+                          onClick={handleOpenIngestion}
+                          className="px-6 py-3 bg-[#19B89A] hover:bg-[#16A489] text-[#0F1115] font-semibold text-sm rounded-lg transition-colors flex items-center gap-2 cursor-pointer shadow-sm"
                         >
-                          Retry Loading Cases
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+                          </svg>
+                          <span>Start New Investigation</span>
                         </button>
-                      </div>
-                    ) : cases.length === 0 ? (
-                      <div className="text-center py-10 text-xs text-zinc-500 font-mono space-y-2 border border-dashed border-zinc-800 rounded-lg">
-                        <p>No security cases recorded yet.</p>
+
                         <button
                           onClick={() => {
                             setViewingCaseId(null);
                             setActiveNav("cases");
                           }}
-                          className="px-3 py-1.5 bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 border border-emerald-500/30 rounded text-xs font-semibold cursor-pointer"
+                          className="px-5 py-3 bg-[#1D2128] hover:bg-[#2A3038] text-[#F5F7FA] font-medium text-sm rounded-lg border border-[#2A3038] transition-colors cursor-pointer"
                         >
-                          + Create First Security Case
+                          Open Existing Case
                         </button>
-                      </div>
-                    ) : (
-                      <div className="space-y-2.5">
-                        {cases.slice(0, 5).map((c) => (
-                          <div
-                            key={c.id}
-                            onClick={() => handleOpenCase(c.id)}
-                            className="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-lg bg-zinc-950/60 border border-zinc-800/80 hover:border-emerald-500/50 hover:bg-zinc-900/50 transition-all gap-3 cursor-pointer group"
-                          >
-                            <div className="space-y-1 min-w-0">
-                              <div className="flex items-center gap-2.5">
-                                <span className="font-mono text-xs text-emerald-400 font-bold group-hover:underline">
-                                  {c.case_number || c.case_id || c.id}
-                                </span>
-                                <span className="text-xs font-semibold text-zinc-200 truncate">
-                                  {c.title}
-                                </span>
-                              </div>
-                              <p className="text-xs text-zinc-400 line-clamp-1">
-                                {c.description || "No description provided."}
-                              </p>
-                            </div>
 
-                            <div className="flex items-center gap-3 flex-none">
-                              <span
-                                className={`text-[11px] font-mono px-2 py-0.5 rounded border uppercase font-semibold ${
-                                  c.priority === "CRITICAL"
-                                    ? "bg-red-500/20 text-red-400 border-red-500/40"
-                                    : c.priority === "HIGH"
-                                    ? "bg-amber-500/20 text-amber-400 border-amber-500/40"
-                                    : "bg-zinc-800 text-zinc-400 border-zinc-700"
-                                }`}
-                              >
-                                {c.priority}
-                              </span>
-                              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700 uppercase">
-                                {c.status}
-                              </span>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleOpenCase(c.id);
-                                }}
-                                className="px-3 py-1 bg-zinc-800 hover:bg-emerald-600 hover:text-zinc-950 text-zinc-200 text-xs font-mono rounded border border-zinc-700 transition-all cursor-pointer font-medium"
-                              >
-                                Open Workspace
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                        {demoBurglaryVideo && (
+                          <button
+                            onClick={() => {
+                              handleOpenVideoInvestigation(demoBurglaryVideo.id, demoBurglaryVideo.filename);
+                            }}
+                            className="px-4 py-3 text-xs text-[#A7AFBA] hover:text-[#F5F7FA] hover:bg-[#1D2128] rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+                          >
+                            <span>Quick Demo: {demoBurglaryVideo.filename} &rarr;</span>
+                          </button>
+                        )}
                       </div>
-                    )}
+                    </div>
                   </div>
 
-                  {/* Ethics & Reliability Banner */}
-                  <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/30 p-4 text-xs text-zinc-400 space-y-2">
-                    <div className="font-semibold text-zinc-300 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                      Sentinel Reliability &amp; Privacy Safeguards
+                  {/* FOUR CLEAN METRICS (PLATFORM-WIDE) */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-[#737C87] px-1">
+                      <span>Platform-Wide Overview (All Stored Footage)</span>
+                      <span className="text-[#A7AFBA] font-normal normal-case">Global Platform Totals</span>
                     </div>
-                    <p className="leading-relaxed">
-                      Sentinel strictly operates as an investigative decision-support assistant. Final assessment scores &le; 0.65 are classified as <span className="text-amber-400 font-mono font-semibold">REVIEW_REQUIRED</span> and mandate human analyst confirmation. All track IDs are strictly anonymous; facial recognition, biometric matching, and identity attribution are fundamentally prohibited.
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <div className="p-5 rounded-xl bg-[#171A20] border border-[#2A3038] space-y-1">
+                        <div className="text-xs text-[#737C87]">Platform Footage</div>
+                        <div className="text-3xl font-bold text-[#F5F7FA]">
+                          {analytics?.total_videos ?? recentVideos.length}
+                        </div>
+                        <div className="text-xs text-[#A7AFBA]">Processed video records</div>
+                      </div>
+
+                      <div className="p-5 rounded-xl bg-[#171A20] border border-[#2A3038] space-y-1">
+                        <div className="text-xs text-[#737C87]">Platform Incidents</div>
+                        <div className="text-3xl font-bold text-[#F5F7FA]">
+                          {analytics?.total_correlated_incidents ?? 0}
+                        </div>
+                        <div className="text-xs text-[#A7AFBA]">Total platform findings</div>
+                      </div>
+
+                      <div className="p-5 rounded-xl bg-[#171A20] border border-[#2A3038] space-y-1">
+                        <div className="text-xs text-[#737C87]">Platform Evidence</div>
+                        <div className="text-3xl font-bold text-[#F5F7FA]">
+                          {analytics?.validated_evidence_count ?? analytics?.total_evidence ?? 0}
+                        </div>
+                        <div className="text-xs text-[#A7AFBA]">Total preserved artifacts</div>
+                      </div>
+
+                      <div className="p-5 rounded-xl bg-[#171A20] border border-[#2A3038] space-y-1">
+                        <div className="text-xs text-[#737C87]">Platform Cases</div>
+                        <div className="text-3xl font-bold text-[#F5F7FA]">
+                          {analytics?.total_cases ?? cases.length}
+                        </div>
+                        <div className="text-xs text-[#A7AFBA]">Active security dossiers</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* VISUAL WORKFLOW EXPLAINER */}
+                  <div className="rounded-xl border border-[#2A3038] bg-[#171A20] p-6 space-y-4">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-[#737C87]">
+                      Investigation Workflow
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                      <div className="p-3.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-1 min-w-0">
+                        <div className="text-xs text-[#19B89A] font-semibold">Step 1</div>
+                        <div className="text-sm font-semibold text-[#F5F7FA] truncate">Upload footage</div>
+                        <div className="text-xs text-[#737C87] leading-snug">CCTV or surveillance video</div>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-1 min-w-0">
+                        <div className="text-xs text-[#19B89A] font-semibold">Step 2</div>
+                        <div className="text-sm font-semibold text-[#F5F7FA] truncate">Detect &amp; understand</div>
+                        <div className="text-xs text-[#737C87] leading-snug">Objects, movement &amp; tracks</div>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-1 min-w-0">
+                        <div className="text-xs text-[#19B89A] font-semibold">Step 3</div>
+                        <div className="text-sm font-semibold text-[#F5F7FA] truncate">Correlate evidence</div>
+                        <div className="text-xs text-[#737C87] leading-snug">Snapshots, clips &amp; timestamps</div>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-1 min-w-0">
+                        <div className="text-xs text-[#19B89A] font-semibold">Step 4</div>
+                        <div className="text-sm font-semibold text-[#F5F7FA] truncate">Investigate</div>
+                        <div className="text-xs text-[#737C87] leading-snug">Natural language reasoning</div>
+                      </div>
+
+                      <div className="p-3.5 rounded-lg bg-[#1D2128] border border-[#2A3038] space-y-1 min-w-0">
+                        <div className="text-xs text-[#19B89A] font-semibold">Step 5</div>
+                        <div className="text-sm font-semibold text-[#F5F7FA] truncate" title="Explain findings">Explain findings</div>
+                        <div className="text-xs text-[#737C87] leading-snug">Evidence-backed case dossier</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* SECONDARY ACCESS: PREVIOUSLY INGESTED FOOTAGE */}
+                  {recentVideos.length > 0 && (
+                    <div className="flex items-center justify-between text-xs text-[#737C87] pt-2">
+                      <span>{recentVideos.length} surveillance footage files available in storage.</span>
+                      <button
+                        onClick={() => setIsFootageModalOpen(true)}
+                        className="text-[#19B89A] hover:underline cursor-pointer font-medium"
+                      >
+                        Browse footage library &rarr;
+                      </button>
+                    </div>
+                  )}
+
+                  {/* SAFETY & INTEGRITY SAFEGUARDS */}
+                  <div className="rounded-xl border border-[#2A3038] bg-[#171A20]/60 p-5 space-y-2">
+                    <div className="font-semibold text-[#F5F7FA] flex items-center gap-2 text-sm">
+                      <span className="w-2 h-2 rounded-full bg-[#19B89A]" />
+                      Safety &amp; Integrity Safeguards
+                    </div>
+                    <p className="leading-relaxed text-[#A7AFBA] text-xs">
+                      Sentinel operates as an investigative decision-support assistant. Final assessment scores &le; 0.65 require human confirmation. All object tracking is strictly anonymous; facial recognition, biometric matching, and identity attribution are prohibited.
                     </p>
                   </div>
                 </div>
@@ -836,13 +700,30 @@ export default function AppShell() {
                 </div>
               )}
 
-              {/* 3. VIEW: CAMERAS (Dedicated Cameras & Video Workspace) */}
+              {/* 3. VIEW: SECURITY OPERATIONS (Cybersecurity & Physical Correlation) */}
+              {activeNav === "security-ops" && (
+                <div className="w-full">
+                  <SecurityOperationsView
+                    onInvestigateVideo={(videoId: string) => handleOpenVideoInvestigation(videoId)}
+                    onNavigateToCase={(caseId: string) => handleOpenCase(caseId)}
+                  />
+                </div>
+              )}
+
+              {/* 4. VIEW: SYSTEM HEALTH (Platform Diagnostics & Analytics) */}
+              {(activeNav === "system" || activeNav === "analytics") && (
+                <div className="w-full">
+                  <AnalyticsWorkspaceView />
+                </div>
+              )}
+
+              {/* FALLBACK PRESERVED VIEWS FOR DEEP LINKS AND CALLBACK HANDLERS */}
               {activeNav === "cameras" && (
                 <div className="w-full">
                   <CamerasWorkspaceView
                     onInvestigateVideo={(videoId: string) => handleOpenVideoInvestigation(videoId)}
                     onIngestVideo={handleOpenIngestion}
-                    onCreateCaseFromVideo={(videoId: string) => {
+                    onCreateCaseFromVideo={() => {
                       setViewingCaseId(null);
                       setActiveNav("cases");
                     }}
@@ -852,14 +733,12 @@ export default function AppShell() {
                 </div>
               )}
 
-              {/* 4. VIEW: LIVE / MULTI-CAMERA */}
               {activeNav === "live" && (
                 <div className="w-full">
                   <MultiCameraSessionPanel />
                 </div>
               )}
 
-              {/* 5. VIEW: INCIDENTS (Dedicated Correlated Incidents Workbench) */}
               {activeNav === "incidents" && (
                 <div className="w-full">
                   <IncidentsWorkbenchView
@@ -871,21 +750,17 @@ export default function AppShell() {
                 </div>
               )}
 
-              {/* 6. VIEW: SEARCH (Dedicated Investigation / Search Workspace) */}
               {activeNav === "search" && (
                 <div className="w-full">
                   <SearchWorkspaceView
                     initialVideoId={currentVideoId || inspectingVideoId || undefined}
                     activeCase={activeCase}
-                    onSeek={(ts: number) => {
-                      // seek handled inside search view
-                    }}
+                    onSeek={() => {}}
                     onIngestVideo={handleOpenIngestion}
                   />
                 </div>
               )}
 
-              {/* 7. VIEW: EVIDENCE (Dedicated Evidence Vault) */}
               {activeNav === "evidence" && (
                 <div className="w-full">
                   <EvidenceVaultView
@@ -894,17 +769,9 @@ export default function AppShell() {
                 </div>
               )}
 
-              {/* 8. VIEW: REPORTS (Dedicated Reports & Dossier Workspace) */}
               {activeNav === "reports" && (
                 <div className="w-full">
                   <ReportsWorkspaceView />
-                </div>
-              )}
-
-              {/* 9. VIEW: ANALYTICS (Dedicated Intelligence & Health Workspace) */}
-              {activeNav === "analytics" && (
-                <div className="w-full">
-                  <AnalyticsWorkspaceView />
                 </div>
               )}
             </>
@@ -912,44 +779,73 @@ export default function AppShell() {
         </main>
       </div>
 
-      {/* ── BOTTOM STATUS BAR ── */}
-      <footer className="h-8 flex-none bg-zinc-900/95 border-t border-zinc-800 px-4 flex items-center justify-between text-xs font-mono text-zinc-400 select-none z-30">
-        <div className="flex items-center gap-3">
-          <span className="text-zinc-200 font-semibold">SENTINEL OPERATIONS PLATFORM</span>
-          <span className="text-zinc-700">|</span>
-          <span>
-            WORKSPACE: <strong className="text-emerald-400 uppercase">{activeNav}</strong>
-          </span>
-          <span className="text-zinc-700">|</span>
-          <span>
-            CASE:{" "}
-            {activeCase ? (
-              <span className="text-cyan-400 font-semibold">
-                {activeCase.case_number || activeCase.case_id || activeCase.id}
-              </span>
-            ) : (
-              <span className="text-zinc-500">UNASSIGNED</span>
-            )}
-          </span>
-        </div>
+      {/* FOOTAGE SELECTION MODAL */}
+      {isFootageModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#171A20] border border-[#2A3038] rounded-xl max-w-2xl w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between border-b border-[#2A3038] pb-3">
+              <h3 className="text-base font-bold text-[#F5F7FA]">Available Surveillance Footage</h3>
+              <button
+                onClick={() => setIsFootageModalOpen(false)}
+                className="text-[#737C87] hover:text-[#F5F7FA] text-lg cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
 
-        <div className="hidden md:flex items-center gap-4 text-zinc-500 text-[11px]">
-          <span>RELIABILITY CEILING: REVIEW_REQUIRED &le; 0.65</span>
-          <span>•</span>
-          <span>BIOMETRICS: DISABLED</span>
-          <span>•</span>
-          <span>TRACKING: ANONYMOUS</span>
-        </div>
+            <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+              {[...recentVideos]
+                .sort((a, b) => {
+                  if (a.id === "0d4d92f9-19f8-42e3-925f-1931cb557705") return -1;
+                  if (b.id === "0d4d92f9-19f8-42e3-925f-1931cb557705") return 1;
+                  return 0;
+                })
+                .map((video) => {
+                  const isCanonical = video.id === "0d4d92f9-19f8-42e3-925f-1931cb557705";
+                  return (
+                    <div
+                      key={video.id}
+                      onClick={() => handleOpenVideoInvestigation(video.id, video.filename)}
+                      className={`p-3.5 rounded-lg border cursor-pointer flex items-center justify-between transition-colors ${
+                        isCanonical
+                          ? "bg-[#14231E] border-[#19B89A]/50 hover:border-[#19B89A]"
+                          : "bg-[#1D2128] border-[#2A3038] hover:border-[#19B89A]"
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-[#F5F7FA] truncate">{video.filename}</span>
+                          {isCanonical && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-[#19B89A]/20 text-[#19B89A] border border-[#19B89A]/40 shrink-0">
+                              CANONICAL BENCHMARK
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-[#737C87] font-mono mt-0.5">
+                          {video.incidents_count ? `${video.incidents_count} incidents` : "0 incidents"} &bull;{" "}
+                          {video.evidence_count ? `${video.evidence_count} evidence` : "0 evidence"} &bull;{" "}
+                          {video.duration_seconds ? `${Math.round(video.duration_seconds)}s` : "Stored"}
+                        </div>
+                      </div>
+                      <span className="text-xs font-semibold text-[#19B89A] shrink-0 ml-4">
+                        Open &rarr;
+                      </span>
+                    </div>
+                  );
+                })}
+            </div>
 
-        <div className="flex items-center gap-3">
-          <span className="text-zinc-500">UTC: {currentTime || "--:--:--"}</span>
-          <span className="text-zinc-700">|</span>
-          <span className="flex items-center gap-1.5 text-emerald-400 font-semibold">
-            <span className="h-2 w-2 rounded-full bg-emerald-400" />
-            CORE ACTIVE
-          </span>
+            <div className="pt-3 border-t border-[#2A3038] flex justify-end">
+              <button
+                onClick={() => setIsFootageModalOpen(false)}
+                className="px-4 py-2 bg-[#1D2128] hover:bg-[#2A3038] text-[#F5F7FA] rounded-lg text-xs font-medium cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
-      </footer>
+      )}
     </div>
   );
 }

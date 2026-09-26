@@ -156,8 +156,9 @@ class FrameQualityGate:
         else:
             gray = frame.copy()
 
-        mean_val = float(np.mean(gray))
-        std_val = float(np.std(gray))
+        mean_mat, std_mat = cv2.meanStdDev(gray)
+        mean_val = float(mean_mat[0][0])
+        std_val = float(std_mat[0][0])
         result.mean_brightness = round(mean_val, 2)
         result.std_dev = round(std_val, 2)
 
@@ -187,7 +188,7 @@ class FrameQualityGate:
 
         # 5. Blur gate — only if frame has sufficient contrast to measure
         if std_val >= min_std_dev and mean_val >= darkness_threshold:
-            lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            lap_var = float(cv2.Laplacian(gray, cv2.CV_32F).var())
             result.blur_variance = round(lap_var, 3)
             if lap_var < blur_threshold:
                 reasons.append(

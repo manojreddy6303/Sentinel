@@ -75,6 +75,8 @@ class BaseIncidentDetector(ABC):
         human_verification_required: bool = True,
         prefix: str = "INC",
         incident_metadata: Optional[Dict[str, Any]] = None,
+        pattern_evidence_strength: Optional[float] = None,
+        assessment_score: Optional[float] = None,
     ) -> IncidentCandidate:
         """
         Utility to construct a fully formed IncidentCandidate with safety guarantees.
@@ -95,6 +97,9 @@ class BaseIncidentDetector(ABC):
                 onset_timestamp=start_t,
             )
 
+        p_strength = pattern_evidence_strength if pattern_evidence_strength is not None else confidence
+        a_score = assessment_score if assessment_score is not None else confidence
+
         return IncidentCandidate(
             incident_id=inc_id,
             video_id=video_id,
@@ -105,6 +110,8 @@ class BaseIncidentDetector(ABC):
             duration=duration,
             severity=severity,
             confidence=round(clamp_finite(confidence, 0.0, 1.0, default=0.0), 4),
+            pattern_evidence_strength=round(clamp_finite(p_strength, 0.0, 1.0, default=0.0), 4),
+            assessment_score=round(clamp_finite(a_score, 0.0, 1.0, default=0.0), 4),
             track_ids=track_ids or [],
             object_classes=object_classes or [],
             source_detection_ids=source_detection_ids or [],

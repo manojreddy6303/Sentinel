@@ -13,6 +13,7 @@ try:
     from app.api.incidents import router as incidents_router
     from app.api.analytics import router as analytics_router
     from app.api.cameras import router as cameras_router
+    from app.api.cyber import router as cyber_router
     from app.core.config import settings
 except ImportError:
     from backend.app.api.health import router as health_router
@@ -24,6 +25,7 @@ except ImportError:
     from backend.app.api.incidents import router as incidents_router
     from backend.app.api.analytics import router as analytics_router
     from backend.app.api.cameras import router as cameras_router
+    from backend.app.api.cyber import router as cyber_router
     from backend.app.core.config import settings
 
 import json
@@ -73,6 +75,7 @@ app.include_router(cases_router, prefix="/api")
 app.include_router(incidents_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(cameras_router, prefix="/api")
+app.include_router(cyber_router, prefix="/api")
 
 
 @app.get("/")

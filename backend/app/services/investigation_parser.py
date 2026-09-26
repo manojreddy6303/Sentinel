@@ -150,6 +150,7 @@ class InvestigationParser:
 
         if matched_color:
             is_vehicle = bool(re.search(r"\b(car|cars|vehicle|vehicles|truck|trucks|bus|buses|motorcycle|motorcycles|automobile|automobiles)\b", cleaned))
+            is_person = bool(re.search(r"\b(person|people|someone|suspect|individual|man|woman|guy|girl|wearing|hoodie|jacket|shirt|clothing)\b", cleaned))
             if is_vehicle:
                 # Extract specific vehicle class if present
                 v_class = "vehicle_group"
@@ -165,13 +166,22 @@ class InvestigationParser:
                         "object_class": v_class,
                     },
                 }
+            elif is_person:
+                return {
+                    "is_supported": True,
+                    "result_type": "tracks",
+                    "interpreted_filters": {
+                        "color": matched_color,
+                        "object_class": "person",
+                    },
+                }
             else:
-                # Color queried for non-vehicle (e.g. shirt, person, bag)
+                # Color queried for non-supported category
                 return {
                     "is_supported": False,
                     "message": (
-                        "Visual color analysis is currently supported for vehicles only. "
-                        "Sentinel can investigate vehicle colors (e.g., blue car, red truck), object classes, timestamps, and events."
+                        "Visual color analysis is supported for vehicles and person clothing. "
+                        "Sentinel can investigate object colors (e.g., blue person, red truck), classes, timestamps, and events."
                     ),
                     "interpreted_filters": {},
                     "result_type": "unsupported",

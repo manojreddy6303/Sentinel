@@ -277,6 +277,8 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                             reason="Suspected object takeaway interaction start",
                         )
                     ],
+                    pattern_evidence_strength=scoring.get("pattern_strength", scoring["score"]),
+                    assessment_score=scoring["score"],
                     prefix="THEFT",
                 )
                 candidates.append(cand)

@@ -77,7 +77,8 @@ def get_analytics() -> Dict[str, Any]:
             (CorrelatedIncidentModel.validation_decision == "REVIEW_REQUIRED")
         ).count()
 
-        # Specialized observations counts — these are RAW (unvalidated) counts
+        # Specialized observations counts:
+        # Pipeline Invariant: RAW = VALID + REJECTED + UNCERTAIN
         specialized_counts = {
             "smoke": db.query(SpecializedObservationModel).filter(
                 SpecializedObservationModel.class_name == "smoke"
@@ -87,6 +88,20 @@ def get_analytics() -> Dict[str, Any]:
             ).count(),
             "weapon": db.query(SpecializedObservationModel).filter(
                 SpecializedObservationModel.class_name == "weapon"
+            ).count(),
+        }
+        specialized_validated = {
+            "smoke": db.query(SpecializedObservationModel).filter(
+                SpecializedObservationModel.class_name == "smoke",
+                SpecializedObservationModel.validation_status == "VALID",
+            ).count(),
+            "fire": db.query(SpecializedObservationModel).filter(
+                SpecializedObservationModel.class_name == "fire",
+                SpecializedObservationModel.validation_status == "VALID",
+            ).count(),
+            "weapon": db.query(SpecializedObservationModel).filter(
+                SpecializedObservationModel.class_name == "weapon",
+                SpecializedObservationModel.validation_status == "VALID",
             ).count(),
         }
 
@@ -133,6 +148,7 @@ def get_analytics() -> Dict[str, Any]:
             "review_required_count": review_required_count,
             "review_ceiling": 0.65,
             "specialized_counts": specialized_counts,
+            "specialized_validated": specialized_validated,
             "detector_health": detector_health,
         }
     finally:

@@ -323,14 +323,34 @@ class EvidenceService:
                                     o_lbl = f"{o_cls.upper()} • {o_track_id or 'TRACK'}"
                                 self._draw_box_label(annotated, o_lbl, ox1, oy1, (255, 200, 0), (0, 0, 0), font, base_scale, thickness)
 
-                        # 3. Top Banner: Potential Theft Pattern & Confidence Terminology
-                        score_val = confidence if confidence is not None else 0.95
-                        score_pct = int(score_val * 100)
+                        # 3. Top Banner: Authoritative Score & Validation Semantics
+                        meta = getattr(matched_sec_ev, "incident_metadata", {}) or {}
+                        p_str = meta.get("pattern_evidence_strength")
+                        a_score = meta.get("assessment_score")
+                        v_dec = meta.get("validation_decision")
+                        if p_str is None:
+                            p_str = 0.95
+                        if a_score is None:
+                            a_score = confidence if confidence is not None else 0.65
+                        if v_dec is None:
+                            v_dec = "REVIEW_REQUIRED" if a_score <= 0.65 else "ACCEPTED"
+
+                        p_pct = int(round(p_str * 100))
+                        a_pct = int(round(a_score * 100))
+
                         banner_title = "POTENTIAL THEFT PATTERN"
-                        banner_sub = f"Pattern Evidence Strength: {score_pct}% | Human verification required"
+                        if v_dec == "REVIEW_REQUIRED":
+                            banner_sub = f"Pattern Evidence Strength: {p_pct}% • Final Assessment: {a_pct}% (REVIEW_REQUIRED) — Human verification required"
+                        elif v_dec == "ACCEPTED":
+                            banner_sub = f"Pattern Evidence Strength: {p_pct}% • Final Assessment: {a_pct}% (ACCEPTED)"
+                        else:
+                            banner_sub = f"Pattern Evidence Strength: {p_pct}% • Final Assessment: {a_pct}% ({v_dec})"
 
                         if not has_person_box and not has_object_box:
-                            banner_sub = "Behavior event — no spatial bounding box available | Human verification required"
+                            if v_dec == "REVIEW_REQUIRED":
+                                banner_sub = f"Pattern: {p_pct}% • Final: {a_pct}% (REVIEW_REQUIRED) — Human verification required (no box)"
+                            else:
+                                banner_sub = f"Pattern: {p_pct}% • Final: {a_pct}% ({v_dec}) (no box)"
 
                         self._draw_banner(annotated, banner_title, banner_sub, font, base_scale, frame_w, frame_h)
 
@@ -622,6 +642,9 @@ class EvidenceService:
         cv2.line(img, (0, banner_h), (frame_w, banner_h), (0, 230, 115), 1)
 
         t_scale = max(0.36, font_scale * 0.95)
-        s_scale = max(0.30, font_scale * 0.78)
+        s_scale = max(0.28, font_scale * 0.78)
+        (sw, _), _ = cv2.getTextSize(sub, font, s_scale, 1)
+        if sw > frame_w - 16:
+            s_scale = max(0.22, s_scale * ((frame_w - 16) / max(1, sw)))
         cv2.putText(img, title, (8, int(banner_h * 0.44)), font, t_scale, (0, 230, 115), 1, cv2.LINE_AA)
         cv2.putText(img, sub, (8, int(banner_h * 0.84)), font, s_scale, (220, 220, 220), 1, cv2.LINE_AA)

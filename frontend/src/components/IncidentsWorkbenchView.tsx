@@ -32,6 +32,7 @@ export default function IncidentsWorkbenchView({
   const [selectedDecision, setSelectedDecision] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedIncidentId, setExpandedIncidentId] = useState<string | null>(null);
+  const [totalIncidents, setTotalIncidents] = useState<number>(0);
 
   // Add to Case Modal
   const [isAddCaseOpen, setIsAddCaseOpen] = useState(false);
@@ -57,6 +58,7 @@ export default function IncidentsWorkbenchView({
         listCases({ limit: 100 }),
       ]);
       setIncidents(incRes.incidents || []);
+      setTotalIncidents(incRes.total ?? incRes.incidents?.length ?? 0);
       setVideos(vidRes.videos || []);
       setCases(caseRes.cases || []);
       if (caseRes.cases?.length > 0 && !selectedCaseId) {
@@ -104,7 +106,7 @@ export default function IncidentsWorkbenchView({
               Incident Intelligence Workbench
             </h1>
             <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-semibold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">
-              {incidents.length} Correlated Incidents
+              {totalIncidents} Correlated Incidents
             </span>
           </div>
           <p className="text-sm text-zinc-400 mt-1.5">

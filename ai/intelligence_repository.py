@@ -161,7 +161,7 @@ class SecurityIntelligenceRepository:
             event_models = []
             for e in security_events:
                 ev_id = e.event_id or str(uuid.uuid4())
-                # Check for existing ID collision
+                # If explicit test ID already exists in the database, assign unique ID to prevent UNIQUE constraint violation
                 if db.query(SecurityEventModel.id).filter(SecurityEventModel.id == ev_id).first():
                     ev_id = str(uuid.uuid4())
                 e.event_id = ev_id
@@ -186,6 +186,18 @@ class SecurityIntelligenceRepository:
                     if getattr(e, "is_prior_object_observation", False):
                         bbox_dict["is_prior_object_observation"] = True
 
+                e_meta = getattr(e, "incident_metadata", None) or {}
+                if not isinstance(e_meta, dict):
+                    e_meta = {}
+                else:
+                    e_meta = dict(e_meta)
+                if getattr(e, "pattern_evidence_strength", None) is not None:
+                    e_meta.setdefault("pattern_evidence_strength", e.pattern_evidence_strength)
+                if getattr(e, "assessment_score", None) is not None:
+                    e_meta.setdefault("assessment_score", e.assessment_score)
+                if getattr(e, "validation_decision", None) is not None:
+                    e_meta.setdefault("validation_decision", e.validation_decision)
+
                 event_models.append(
                     SecurityEventModel(
                         id=ev_id,
@@ -206,7 +218,7 @@ class SecurityIntelligenceRepository:
                         detector_version=getattr(e, "detector_version", None),
                         category=getattr(e, "category", None),
                         human_verification_required=int(getattr(e, "human_verification_required", True)),
-                        incident_metadata=getattr(e, "incident_metadata", None),
+                        incident_metadata=e_meta,
                     )
                 )
             if event_models:
@@ -474,8 +486,13 @@ class SecurityIntelligenceRepository:
             if severity:
                 q = q.filter(SecurityEventModel.severity == severity)
             rows = q.order_by(SecurityEventModel.timestamp_seconds.asc()).all()
-            return [
-                {
+            results = []
+            for r in rows:
+                meta = r.incident_metadata if isinstance(getattr(r, "incident_metadata", None), dict) else {}
+                val_dec = meta.get("validation_decision", "ACCEPTED")
+                p_strength = meta.get("pattern_evidence_strength", r.confidence)
+                a_score = meta.get("assessment_score", r.confidence)
+                results.append({
                     "id": r.id,
                     "event_id": r.id,
                     "event_type": r.event_type,
@@ -487,6 +504,8 @@ class SecurityIntelligenceRepository:
                     "object_class": r.object_class,
                     "zone_name": r.zone_name,
                     "confidence": r.confidence,
+                    "pattern_evidence_strength": round(float(p_strength), 4),
+                    "assessment_score": round(float(a_score), 4),
                     "bounding_box": r.bounding_box,
                     "description": r.description,
                     "observable_signals": r.observable_signals,
@@ -495,11 +514,10 @@ class SecurityIntelligenceRepository:
                     "detector_version": getattr(r, "detector_version", None),
                     "category": getattr(r, "category", None),
                     "human_verification_required": bool(getattr(r, "human_verification_required", 1)),
-                    "validation_decision": (r.incident_metadata or {}).get("validation_decision", "ACCEPTED") if isinstance(getattr(r, "incident_metadata", None), dict) else "ACCEPTED",
-                    "incident_metadata": getattr(r, "incident_metadata", None),
-                }
-                for r in rows
-            ]
+                    "validation_decision": val_dec,
+                    "incident_metadata": r.incident_metadata,
+                })
+            return results
         finally:
             db.close()
 

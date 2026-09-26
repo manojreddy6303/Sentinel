@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 import cv2
+import numpy as np
 
 from ai.schemas import (
     BoundingBox,
@@ -101,9 +102,13 @@ class SecurityIntelligencePipeline:
         fps: float = 30.0,
         duration_seconds: float = 0.0,
         sample_rate_fps: float = 1.0,
+        sampled_frames: Optional[Dict[float, np.ndarray]] = None,
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Execute full security intelligence pipeline across a video and its raw detections.
+        Accepts optional sampled_frames mapping {timestamp: frame_bgr} to avoid redundant disk I/O.
         """
         # Group raw events by timestamp/frame for sequential tracker feeding
         events_by_time: Dict[float, List[Dict[str, Any]]] = defaultdict(list)
@@ -113,10 +118,25 @@ class SecurityIntelligencePipeline:
 
         sorted_timestamps = sorted(events_by_time.keys())
 
-        # Open video for visual crops (colors, faces)
+        # Open video for visual crops (colors, faces) only if frames not pre-supplied in memory
         cap = None
-        if os.path.exists(video_path):
+        current_cap_frame_idx = -1
+        video_w: Optional[float] = frame_width
+        video_h: Optional[float] = frame_height
+
+        if sampled_frames:
+            for smp in sampled_frames.values():
+                if hasattr(smp, "shape") and len(smp.shape) >= 2:
+                    video_h, video_w = float(smp.shape[0]), float(smp.shape[1])
+                    break
+
+        if not sampled_frames and os.path.exists(video_path):
             cap = cv2.VideoCapture(video_path)
+            if cap.isOpened() and (video_w is None or video_h is None):
+                vw = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                vh = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                if vw and vh and vw > 0 and vh > 0:
+                    video_w, video_h = float(vw), float(vh)
 
         tracks: List[TrackedObject] = []
         vehicle_attributes: List[VehicleAttribute] = []
@@ -163,16 +183,47 @@ class SecurityIntelligencePipeline:
                 d for d in frame_dets
                 if str(d.get("validation_status", "VALID")).upper() != "REJECTED"
             ]
-            active_tracks = self.tracker.update(timestamp=t, detections=valid_frame_dets)
+            active_tracks = self.tracker.update(
+                timestamp=t,
+                detections=valid_frame_dets,
+                frame_width=video_w,
+                frame_height=video_h,
+            )
 
-            # Retrieve frame image if video is accessible
+            # Retrieve frame image: from memory cache first, or sequential video stream
             frame_bgr = None
             frame_idx = int(round(t * fps))
-            if cap and cap.isOpened():
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    frame_bgr = frame
+
+            if sampled_frames:
+                t_key = round(t, 3)
+                if t_key in sampled_frames:
+                    frame_bgr = sampled_frames[t_key]
+                else:
+                    best_match = None
+                    min_diff = 0.1
+                    for k in sampled_frames:
+                        diff = abs(k - t)
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_match = k
+                    if best_match is not None:
+                        frame_bgr = sampled_frames[best_match]
+
+            if frame_bgr is None and cap and cap.isOpened():
+                if frame_idx >= current_cap_frame_idx:
+                    while current_cap_frame_idx < frame_idx:
+                        ret, frame = cap.read()
+                        if not ret or frame is None:
+                            break
+                        current_cap_frame_idx += 1
+                        if current_cap_frame_idx == frame_idx:
+                            frame_bgr = frame
+                else:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        frame_bgr = frame
+                        current_cap_frame_idx = frame_idx
 
             # Process vehicle colors, face crops, and specialized visual detections
             if frame_bgr is not None:
@@ -233,10 +284,11 @@ class SecurityIntelligencePipeline:
 
                     track_id = matched_track.track_id if matched_track else None
 
-                    # Vehicle Color Analysis (only for validated/reliable vehicle detections)
-                    if cls in ["car", "bus", "truck", "motorcycle"]:
+                    # Visual Color Analysis (vehicles and persons)
+                    if cls in ["car", "bus", "truck", "motorcycle", "person"]:
                         det_conf = float(det.get("confidence", 0.0))
-                        if det_conf >= 0.40 or (matched_track and matched_track.detection_count >= 2):
+                        min_color_conf = 0.35 if cls == "person" else 0.40
+                        if det_conf >= min_color_conf or (matched_track and matched_track.detection_count >= 2):
                             v_attr = self.color_analyzer.analyze(
                                 frame_bgr=frame_bgr,
                                 bbox=bbox,
@@ -244,7 +296,8 @@ class SecurityIntelligencePipeline:
                                 object_class=cls,
                                 track_id=track_id,
                             )
-                            vehicle_attributes.append(v_attr)
+                            if cls != "person":
+                                vehicle_attributes.append(v_attr)
                             if matched_track and v_attr.color != "unknown":
                                 matched_track.color = v_attr.color
                                 matched_track.color_confidence = v_attr.confidence

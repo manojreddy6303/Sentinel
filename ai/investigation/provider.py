@@ -67,12 +67,12 @@ class GeminiProvider(LLMProvider):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gemini-3.6-flash",
+        model: str = "gemini-flash-latest",
         temperature: float = 0.1,
         timeout: float = 30.0,
     ):
         self.api_key = (api_key or "").strip()
-        self.model = model or "gemini-3.6-flash"
+        self.model = model or "gemini-flash-latest"
         self.temperature = temperature
         self.timeout = timeout
 
@@ -407,7 +407,7 @@ def get_llm_provider(
 
     prov = (provider_name or settings.LLM_PROVIDER or "gemini").lower()
     key = api_key if api_key is not None else settings.LLM_API_KEY
-    mdl = model or settings.LLM_MODEL or "gemini-3.6-flash"
+    mdl = model or settings.LLM_MODEL or "gemini-flash-latest"
 
     if prov == "mock":
         return MockLLMProvider()

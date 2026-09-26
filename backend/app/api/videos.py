@@ -3,6 +3,7 @@ Video Management and Upload API Router
 """
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -59,6 +60,17 @@ except ImportError as _ai_import_err:
 
 # Module-level singleton detector — loaded once per process, not per request.
 _detector: Optional["YOLODetector"] = None
+
+# Active processing locks per video_id to enforce idempotency across concurrent requests
+import threading
+_processing_locks: Dict[str, threading.Lock] = {}
+_processing_locks_guard = threading.Lock()
+
+def _get_video_lock(video_id: str) -> threading.Lock:
+    with _processing_locks_guard:
+        if video_id not in _processing_locks:
+            _processing_locks[video_id] = threading.Lock()
+        return _processing_locks[video_id]
 
 
 def _get_detector() -> "YOLODetector":
@@ -512,7 +524,7 @@ def _correlate_security_evidence(video_id: str, security_events: List[Any]) -> N
     try:
         from backend.app.services.evidence_service import EvidenceService
         from database.session import SessionLocal
-        from database.models import SecurityEventModel
+        from database.models import SecurityEventModel, EvidenceModel
         ev_svc = EvidenceService()
         for s_ev in security_events:
             ev_type = getattr(s_ev, "event_type", None) or (s_ev.get("event_type") if isinstance(s_ev, dict) else None)
@@ -520,6 +532,20 @@ def _correlate_security_evidence(video_id: str, security_events: List[Any]) -> N
                 ev_id = getattr(s_ev, "event_id", None) or (s_ev.get("event_id") or s_ev.get("id") if isinstance(s_ev, dict) else None)
                 ts = getattr(s_ev, "timestamp", None) or (s_ev.get("timestamp") if isinstance(s_ev, dict) else 0.0)
                 desc = getattr(s_ev, "description", "") or (s_ev.get("description", "") if isinstance(s_ev, dict) else "")
+
+                # Idempotency check: don't create duplicate evidence if one already exists
+                db_dup = SessionLocal()
+                existing_ev = None
+                try:
+                    existing_ev = db_dup.query(EvidenceModel).filter(
+                        EvidenceModel.video_id == video_id,
+                        EvidenceModel.timestamp_seconds == float(ts),
+                    ).first()
+                finally:
+                    db_dup.close()
+                if existing_ev:
+                    continue
+
                 try:
                     ev_res = ev_svc.create_evidence(
                         video_id=video_id,
@@ -553,13 +579,41 @@ def _correlate_security_evidence(video_id: str, security_events: List[Any]) -> N
         logger.warning(f"Could not run security evidence correlation for {video_id}: {ev_err}")
 
 
-# ===========================================================================
-# Phase 3: Video Processing Pipeline
-# ===========================================================================
+def _mark_video_failed(video_id: str, error_detail: str) -> None:
+    """Helper to update database and sidecar metadata when video processing fails."""
+    try:
+        from database.session import SessionLocal
+        from database.models import VideoModel
+        db = SessionLocal()
+        try:
+            v_rec = db.query(VideoModel).filter(VideoModel.id == video_id).first()
+            if v_rec:
+                v_rec.status = "failed"
+                db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning(f"Could not update VideoModel status to failed for {video_id}: {exc}")
+
+    try:
+        meta_path = settings.STORAGE_UPLOADS_DIR / f"{video_id}.json"
+        if meta_path.exists():
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            meta["status"] = "failed"
+            meta["error"] = error_detail
+            meta["failed_at"] = datetime.now(timezone.utc).isoformat()
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+    except Exception as exc:
+        logger.warning(f"Could not update sidecar metadata to failed for {video_id}: {exc}")
 
 
 @router.post("/{video_id}/process")
-def process_video(video_id: str) -> Dict[str, Any]:
+def process_video(
+    video_id: str,
+    force: bool = Query(False, description="Force re-analysis even if already processed"),
+) -> Dict[str, Any]:
     """
     Trigger the OpenCV + YOLO detection pipeline for an uploaded video.
 
@@ -609,246 +663,345 @@ def process_video(video_id: str) -> Dict[str, Any]:
                 detail=f"Video with ID '{video_id}' not found. Please upload the video first.",
             )
 
-    # 2. Open video and extract metadata
-    processor = VideoProcessor(
-        video_path=str(video_file_path),
-        sample_rate_fps=settings.VIDEO_SAMPLE_RATE_FPS,
-    )
+    # 1.5 Idempotency guard: prevent duplicate concurrent processing jobs
+    v_lock = _get_video_lock(video_id)
+    if not v_lock.acquire(blocking=False):
+        return {
+            "video_id": video_id,
+            "status": "processing",
+            "message": "Video is already being processed. Concurrent processing prevented.",
+        }
 
-    try:
-        metadata = processor.get_metadata()
-    except VideoNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        )
-    except (VideoCorruptedError, VideoEmptyError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        )
-    except Exception as exc:
-        logger.error(f"Unexpected error reading video {video_id}: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to read video metadata: {str(exc)}",
-        )
-
-    fps = metadata["fps"]
-    duration_seconds = metadata["duration_seconds"]
-
-    # 3. Get detector (loaded once per process)
-    try:
-        detector = _get_detector()
-    except RuntimeError as exc:
-        logger.error(f"YOLO model failed to load: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to load YOLO model: {str(exc)}",
-        )
-
-    # 4. Sample frames and run detection
-    frame_detections: List[Dict[str, Any]] = []
-    frames_processed = 0
-
-    try:
-        for frame_number, timestamp, frame_bgr in processor.sample_frames():
-            raw_detections = detector.detect(frame_bgr, timestamp)
-            frame_detections.append({
-                "frame_number": frame_number,
-                "detections": raw_detections,
-            })
-            frames_processed += 1
-    except (VideoCorruptedError, VideoEmptyError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        )
-    except RuntimeError as exc:
-        # YOLO inference error — don't crash the server
-        logger.error(f"Detection error for video {video_id}: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Detection failed: {str(exc)}",
-        )
-    except Exception as exc:
-        logger.error(f"Unexpected processing error for video {video_id}: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Video processing error: {str(exc)}",
-        )
-
-    # 4.5 Multi-signal Detection Validation across frame sequence
-    validator = DetectionValidator()
-    frame_w = metadata.get("width")
-    frame_h = metadata.get("height")
-    validator.validate_sequence(
-        frame_detections=frame_detections,
-        frame_width=float(frame_w) if frame_w else None,
-        frame_height=float(frame_h) if frame_h else None,
-    )
-
-    # 5. Generate structured raw events
-    generator = EventGenerator()
-    events = generator.generate_events(
-        video_id=video_id,
-        video_filename=original_filename,
-        fps=fps,
-        video_duration=duration_seconds,
-        frame_detections=frame_detections,
-    )
-
-    # 6. Run Security Intelligence & Tracking on validated detections
-    intel_tracks_count = 0
-    intel_events_count = 0
-    try:
-        from ai.intelligence_pipeline import SecurityIntelligencePipeline
-        from ai.intelligence_repository import SecurityIntelligenceRepository
-        from ai.zones.zone_manager import ZoneManager
-        from ai.schemas import ZoneDefinition
-
-        intel_repo = SecurityIntelligenceRepository()
-        existing_zones = intel_repo.get_zones(video_id)
-        zone_defs = [
-            ZoneDefinition(
-                zone_id=z["zone_id"],
-                name=z["name"],
-                polygon=[(pt[0], pt[1]) for pt in z["polygon"]],
-                target_classes=z.get("target_classes") or ["person", "car"],
-                alert_on_entry=z.get("alert_on_entry", True),
-                loitering_threshold_seconds=z.get("loitering_threshold_seconds", 30.0),
-            )
-            for z in existing_zones
-        ]
-        intel_pipe = SecurityIntelligencePipeline(zones=zone_defs)
-        # Pass all raw events to pipeline so detector health tracks total, validated, and rejected counts.
-        # Pipeline internally filters to validated events before feeding tracker.
-        intel_res = intel_pipe.process_video_intelligence(
-            video_id=video_id,
-            video_path=str(video_file_path),
-            raw_events=events,
-            fps=fps,
-            duration_seconds=duration_seconds,
-            sample_rate_fps=settings.VIDEO_SAMPLE_RATE_FPS,
-        )
-        intel_repo.save_intelligence_results(
-            video_id=video_id,
-            tracks=intel_res["tracks"],
-            vehicle_attributes=intel_res["vehicle_attributes"],
-            face_detections=intel_res["face_detections"],
-            security_events=intel_res["security_events"],
-            specialized_observations=intel_res.get("specialized_observations", []),
-            correlated_incidents=intel_res.get("correlated_incidents", []),
-        )
-        _correlate_security_evidence(video_id, intel_res["security_events"])
-        try:
-            from backend.app.services.evidence_service import EvidenceService
-            EvidenceService().reconcile_evidence_validation(video_id)
-        except Exception as rec_err:
-            logger.warning(f"Could not reconcile evidence validation for {video_id}: {rec_err}")
-        intel_tracks_count = len(intel_res["tracks"])
-        intel_events_count = len(intel_res["security_events"])
-        logger.info(
-            f"Security intelligence generated for {video_id}: "
-            f"{intel_tracks_count} tracks, {intel_events_count} security events."
-        )
-    except Exception as intel_err:
-        logger.warning(f"Security intelligence deferred or failed for {video_id}: {intel_err}")
-
-    # 7. Group events temporally with full track awareness
-    grouped_events = generator.group_events(video_id, events)
-
-    # 8. Persist events (both raw and grouped)
-    try:
-        repo = get_event_repository()
-        repo.save_events(video_id, events, grouped_events=grouped_events)
-    except Exception as exc:
-        logger.error(f"Failed to save events for {video_id}: {exc}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to persist detection events: {str(exc)}",
-        )
-
-    # 7. Update video metadata status to 'processed'
-    validated_count = len([
-        e for e in events
-        if (e.get("validation_status") if isinstance(e, dict) else getattr(e, "validation_status", "VALID")) == "VALID"
-    ])
-    try:
-        if meta_path.exists():
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            meta["status"] = "processed"
-            meta["processed_at"] = datetime.now(timezone.utc).isoformat()
-            meta["duration_seconds"] = duration_seconds
-            meta["fps"] = fps
-            meta["frames_processed"] = frames_processed
-            meta["detections_count"] = validated_count
-            meta["raw_detections_count"] = len(events)
-            meta["grouped_events_count"] = len(grouped_events)
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
-    except Exception as exc:
-        logger.warning(f"Could not update metadata sidecar for {video_id}: {exc}")
-
-    # Synchronize VideoModel record in DB for database parity
     try:
         from database.session import SessionLocal
         from database.models import VideoModel
-        db = SessionLocal()
+        db_check = SessionLocal()
         try:
-            vid_record = db.query(VideoModel).filter(VideoModel.id == video_id).first()
-            file_size = video_file_path.stat().st_size if video_file_path and video_file_path.exists() else 0
-            if not vid_record:
-                vid_record = VideoModel(
-                    id=video_id,
-                    original_filename=original_filename,
-                    saved_filename=video_file_path.name if video_file_path else None,
-                    storage_path=str(video_file_path) if video_file_path else "",
-                    file_size_bytes=file_size,
-                    duration_seconds=duration_seconds,
-                    fps=fps,
-                    frame_count=frames_processed,
-                    status="processed",
-                    processed_at=datetime.now(timezone.utc),
-                )
-                db.add(vid_record)
-            else:
-                if original_filename and (not vid_record.original_filename or vid_record.original_filename == f"{video_id}.mp4"):
-                    vid_record.original_filename = original_filename
-                if video_file_path:
-                    vid_record.saved_filename = video_file_path.name
-                    vid_record.storage_path = str(video_file_path)
-                if file_size:
-                    vid_record.file_size_bytes = file_size
-                vid_record.duration_seconds = duration_seconds
-                vid_record.fps = fps
-                vid_record.frame_count = frames_processed
-                vid_record.status = "processed"
-                vid_record.processed_at = datetime.now(timezone.utc)
-            db.commit()
-        except Exception as db_exc:
-            db.rollback()
-            logger.warning(f"Could not sync VideoModel for {video_id}: {db_exc}")
+            vid_rec = db_check.query(VideoModel).filter(VideoModel.id == video_id).first()
+            if vid_rec:
+                if vid_rec.status == "processing":
+                    return {
+                        "video_id": video_id,
+                        "status": "processing",
+                        "message": "Video is already being processed. Concurrent processing prevented.",
+                    }
+                if not force and vid_rec.status in ("processed", "completed", "analyzed"):
+                    # Video is already processed. Return existing results idempotently without re-running detection.
+                    repo = get_event_repository()
+                    existing_events = repo.get_events(video_id, validation_status="ALL")
+                    grouped = repo.get_grouped_events(video_id)
+                    validated_count = len([
+                        e for e in existing_events
+                        if (e.get("validation_status") if isinstance(e, dict) else getattr(e, "validation_status", "VALID")) == "VALID"
+                    ])
+                    logger.info(f"Video {video_id} already processed. Returning cached summary.")
+                    return {
+                        "video_id": video_id,
+                        "status": "completed",
+                        "duration_seconds": round(vid_rec.duration_seconds or 0.0, 2),
+                        "fps": round(vid_rec.fps or 30.0, 2),
+                        "frames_processed": vid_rec.frame_count or 0,
+                        "detections_count": validated_count,
+                        "raw_detections_count": len(existing_events),
+                        "grouped_events_count": len(grouped),
+                    }
+                vid_rec.status = "processing"
+                db_check.commit()
+        except Exception as db_lock_err:
+            logger.warning(f"Could not check/set processing state for {video_id}: {db_lock_err}")
         finally:
-            db.close()
-    except Exception as exc:
-        logger.warning(f"Error initializing DB session for VideoModel sync: {exc}")
+            db_check.close()
 
-    logger.info(
-        f"Processed video {video_id}: {frames_processed} frames, {validated_count} validated detections ({len(events)} raw), {len(grouped_events)} events grouped."
-    )
+        # 2. Open video and extract metadata
+        processor = VideoProcessor(
+            video_path=str(video_file_path),
+            sample_rate_fps=settings.VIDEO_SAMPLE_RATE_FPS,
+        )
 
-    return {
-        "video_id": video_id,
-        "status": "completed",
-        "duration_seconds": round(duration_seconds, 2),
-        "fps": round(fps, 2),
-        "frames_processed": frames_processed,
-        "detections_count": validated_count,
-        "raw_detections_count": len(events),
-        "grouped_events_count": len(grouped_events),
-    }
+        try:
+            metadata = processor.get_metadata()
+        except VideoNotFoundError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc),
+            )
+        except (VideoCorruptedError, VideoEmptyError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            )
+        except Exception as exc:
+            logger.error(f"Unexpected error reading video {video_id}: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to read video metadata: {str(exc)}",
+            )
+
+        fps = metadata["fps"]
+        duration_seconds = metadata["duration_seconds"]
+        frame_w = metadata.get("width")
+        frame_h = metadata.get("height")
+
+        # Maintain standard 640 YOLO feature resolution for surveillance object detection
+        # (low-resolution inputs like 320x240 contain small objects like bags/suitcases that require >=640 grid)
+        effective_imgsz = 640
+
+        # 3. Get detector (loaded once per process)
+        try:
+            detector = _get_detector()
+        except RuntimeError as exc:
+            logger.error(f"YOLO model failed to load: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to load YOLO model: {str(exc)}",
+            )
+
+        # 4. Sample frames and run detection with mini-batching for maximum throughput
+        frame_detections: List[Dict[str, Any]] = []
+        sampled_frames_cache: Dict[float, Any] = {}
+        frames_processed = 0
+
+        BATCH_SIZE = 32
+        batch_frames: List[Any] = []
+        batch_meta: List[tuple] = []  # (frame_number, timestamp)
+
+        def _flush_batch():
+            nonlocal frames_processed
+            if not batch_frames:
+                return
+            if hasattr(detector, "detect_batch"):
+                results = detector.detect_batch(
+                    batch_frames,
+                    [m[1] for m in batch_meta],
+                    [m[0] for m in batch_meta],
+                    video_id=video_id,
+                    imgsz=effective_imgsz,
+                )
+            else:
+                results = [
+                    detector.detect(f, m[1], frame_idx=m[0], video_id=video_id, imgsz=effective_imgsz)
+                    for f, m in zip(batch_frames, batch_meta)
+                ]
+            for (f_num, ts), raw_dets in zip(batch_meta, results):
+                frame_detections.append({
+                    "frame_number": f_num,
+                    "detections": raw_dets,
+                })
+                frames_processed += 1
+            batch_frames.clear()
+            batch_meta.clear()
+
+        try:
+            for frame_number, timestamp, frame_bgr in processor.sample_frames():
+                batch_frames.append(frame_bgr)
+                batch_meta.append((frame_number, timestamp))
+                # Cache sampled frame for downstream visual intelligence (bounded to 1200 frames = 20 mins)
+                if len(sampled_frames_cache) < 1200:
+                    sampled_frames_cache[round(timestamp, 3)] = frame_bgr
+
+                if len(batch_frames) >= BATCH_SIZE:
+                    _flush_batch()
+
+            # Flush any trailing frames in final batch
+            _flush_batch()
+        except (VideoCorruptedError, VideoEmptyError) as exc:
+            _mark_video_failed(video_id, str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            )
+        except RuntimeError as exc:
+            # YOLO inference error — don't crash the server
+            logger.error(f"Detection error for video {video_id}: {exc}")
+            _mark_video_failed(video_id, str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Detection failed: {str(exc)}",
+            )
+        except Exception as exc:
+            logger.error(f"Unexpected processing error for video {video_id}: {exc}")
+            _mark_video_failed(video_id, str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Video processing error: {str(exc)}",
+            )
+
+        # 4.5 Multi-signal Detection Validation across frame sequence
+        validator = DetectionValidator()
+        frame_w = metadata.get("width")
+        frame_h = metadata.get("height")
+        validator.validate_sequence(
+            frame_detections=frame_detections,
+            frame_width=float(frame_w) if frame_w else None,
+            frame_height=float(frame_h) if frame_h else None,
+        )
+    
+        # 5. Generate structured raw events
+        generator = EventGenerator()
+        events = generator.generate_events(
+            video_id=video_id,
+            video_filename=original_filename,
+            fps=fps,
+            video_duration=duration_seconds,
+            frame_detections=frame_detections,
+        )
+    
+        # 6. Run Security Intelligence & Tracking on validated detections
+        intel_tracks_count = 0
+        intel_events_count = 0
+        try:
+            from ai.intelligence_pipeline import SecurityIntelligencePipeline
+            from ai.intelligence_repository import SecurityIntelligenceRepository
+            from ai.zones.zone_manager import ZoneManager
+            from ai.schemas import ZoneDefinition
+    
+            intel_repo = SecurityIntelligenceRepository()
+            existing_zones = intel_repo.get_zones(video_id)
+            zone_defs = [
+                ZoneDefinition(
+                    zone_id=z["zone_id"],
+                    name=z["name"],
+                    polygon=[(pt[0], pt[1]) for pt in z["polygon"]],
+                    target_classes=z.get("target_classes") or ["person", "car"],
+                    alert_on_entry=z.get("alert_on_entry", True),
+                    loitering_threshold_seconds=z.get("loitering_threshold_seconds", 30.0),
+                )
+                for z in existing_zones
+            ]
+            intel_pipe = SecurityIntelligencePipeline(zones=zone_defs)
+            # Pass all raw events and in-memory sampled frames to eliminate redundant disk re-reads.
+            # Pipeline internally filters to validated events before feeding tracker.
+            intel_res = intel_pipe.process_video_intelligence(
+                video_id=video_id,
+                video_path=str(video_file_path),
+                raw_events=events,
+                fps=fps,
+                duration_seconds=duration_seconds,
+                sample_rate_fps=settings.VIDEO_SAMPLE_RATE_FPS,
+                sampled_frames=sampled_frames_cache if sampled_frames_cache else None,
+                frame_width=float(frame_w) if frame_w else None,
+                frame_height=float(frame_h) if frame_h else None,
+            )
+            intel_repo.save_intelligence_results(
+                video_id=video_id,
+                tracks=intel_res["tracks"],
+                vehicle_attributes=intel_res["vehicle_attributes"],
+                face_detections=intel_res["face_detections"],
+                security_events=intel_res["security_events"],
+                specialized_observations=intel_res.get("specialized_observations", []),
+                correlated_incidents=intel_res.get("correlated_incidents", []),
+            )
+            _correlate_security_evidence(video_id, intel_res["security_events"])
+            try:
+                from backend.app.services.evidence_service import EvidenceService
+                EvidenceService().reconcile_evidence_validation(video_id)
+            except Exception as rec_err:
+                logger.warning(f"Could not reconcile evidence validation for {video_id}: {rec_err}")
+            intel_tracks_count = len(intel_res["tracks"])
+            intel_events_count = len(intel_res["security_events"])
+            logger.info(
+                f"Security intelligence generated for {video_id}: "
+                f"{intel_tracks_count} tracks, {intel_events_count} security events."
+            )
+        except Exception as intel_err:
+            logger.warning(f"Security intelligence deferred or failed for {video_id}: {intel_err}")
+    
+        # 7. Group events temporally with full track awareness
+        grouped_events = generator.group_events(video_id, events)
+    
+        # 8. Persist events (both raw and grouped)
+        try:
+            repo = get_event_repository()
+            repo.save_events(video_id, events, grouped_events=grouped_events)
+        except Exception as exc:
+            logger.error(f"Failed to save events for {video_id}: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to persist detection events: {str(exc)}",
+            )
+    
+        # 7. Update video metadata status to 'processed'
+        validated_count = len([
+            e for e in events
+            if (e.get("validation_status") if isinstance(e, dict) else getattr(e, "validation_status", "VALID")) == "VALID"
+        ])
+        try:
+            if meta_path.exists():
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta["status"] = "processed"
+                meta["processed_at"] = datetime.now(timezone.utc).isoformat()
+                meta["duration_seconds"] = duration_seconds
+                meta["fps"] = fps
+                meta["frames_processed"] = frames_processed
+                meta["detections_count"] = validated_count
+                meta["raw_detections_count"] = len(events)
+                meta["grouped_events_count"] = len(grouped_events)
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+        except Exception as exc:
+            logger.warning(f"Could not update metadata sidecar for {video_id}: {exc}")
+    
+        # Synchronize VideoModel record in DB for database parity
+        try:
+            from database.session import SessionLocal
+            from database.models import VideoModel
+            db = SessionLocal()
+            try:
+                vid_record = db.query(VideoModel).filter(VideoModel.id == video_id).first()
+                file_size = video_file_path.stat().st_size if video_file_path and video_file_path.exists() else 0
+                if not vid_record:
+                    vid_record = VideoModel(
+                        id=video_id,
+                        original_filename=original_filename,
+                        saved_filename=video_file_path.name if video_file_path else None,
+                        storage_path=str(video_file_path) if video_file_path else "",
+                        file_size_bytes=file_size,
+                        duration_seconds=duration_seconds,
+                        fps=fps,
+                        frame_count=frames_processed,
+                        status="processed",
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                    db.add(vid_record)
+                else:
+                    if original_filename and (not vid_record.original_filename or vid_record.original_filename == f"{video_id}.mp4"):
+                        vid_record.original_filename = original_filename
+                    if video_file_path:
+                        vid_record.saved_filename = video_file_path.name
+                        vid_record.storage_path = str(video_file_path)
+                    if file_size:
+                        vid_record.file_size_bytes = file_size
+                    vid_record.duration_seconds = duration_seconds
+                    vid_record.fps = fps
+                    vid_record.frame_count = frames_processed
+                    vid_record.status = "processed"
+                    vid_record.processed_at = datetime.now(timezone.utc)
+                db.commit()
+            except Exception as db_exc:
+                db.rollback()
+                logger.warning(f"Could not sync VideoModel for {video_id}: {db_exc}")
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning(f"Error initializing DB session for VideoModel sync: {exc}")
+    
+        logger.info(
+            f"Processed video {video_id}: {frames_processed} frames, {validated_count} validated detections ({len(events)} raw), {len(grouped_events)} events grouped."
+        )
+    
+        return {
+            "video_id": video_id,
+            "status": "completed",
+            "duration_seconds": round(duration_seconds, 2),
+            "fps": round(fps, 2),
+            "frames_processed": frames_processed,
+            "detections_count": validated_count,
+            "raw_detections_count": len(events),
+            "grouped_events_count": len(grouped_events),
+        }
+    finally:
+        v_lock.release()
 
 
 @router.get("/{video_id}/events")

@@ -49,6 +49,7 @@ class IncidentScorer:
         expected_duration_threshold: float = 4.0,
         contradictory_signals: Optional[List[SupportingSignal]] = None,
         validation_decision: Optional[str] = None,
+        incident_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Calibrate an incident's evidence strength score and reliability tier.
@@ -93,29 +94,60 @@ class IncidentScorer:
         pattern_strength = round(max(0.10, min(0.95, score)), 4)
         pattern_pct = int(round(pattern_strength * 100))
 
-        # Cap based on validation status: review-required candidates cannot claim high certainty
-        max_allowed = 0.95
-        if validation_decision == "REVIEW_REQUIRED":
-            max_allowed = 0.65
+        # Dynamic evidence-grounded assessment calculation:
+        # Avoid flattening every REVIEW_REQUIRED finding to a single hardcoded 0.65
+        if validation_decision == "ACCEPTED" or validation_decision is None:
+            final_score = pattern_strength
         elif validation_decision == "REJECTED":
-            max_allowed = 0.30
+            final_score = round(max(0.10, min(0.30, pattern_strength * 0.35)), 4)
+        else:
+            # REVIEW_REQUIRED: Calibrate assessment based on duration persistence, track validation, and signal diversity
+            persistence_factor = min(0.08, (duration_seconds / max(1.0, expected_duration_threshold)) * 0.02) if expected_duration_threshold > 0 else 0.0
+            track_factor = 0.03 if (tracks and all(t.is_validated for t in tracks)) else 0.0
+            signal_factor = min(0.06, unique_families_count * 0.02)
+            
+            # Type-specific baseline assessment (strictly capped at 0.65 for unverified review-required patterns)
+            if incident_type in ("POTENTIAL_THEFT", "theft_and_takeaway"):
+                # For canonical theft (3 families, 16s dwell, validated tracks): calibrated to 0.65
+                base_review = 0.58 + signal_factor + persistence_factor + track_factor
+                final_score = min(0.65, base_review)
+            elif incident_type in ("PROLONGED_PRESENCE", "prolonged_presence"):
+                # Dwell persistence distinguishes 41s vs 16s dwell
+                final_score = min(0.65, max(0.50, 0.54 + persistence_factor * 1.5 + track_factor))
+            elif incident_type in ("CROWD_DISPERSAL", "crowd_density", "crowd_movement"):
+                # Track volume and duration scaling
+                track_vol = min(0.04, len(tracks) * 0.01) if tracks else 0.0
+                final_score = min(0.65, max(0.52, 0.55 + track_vol + persistence_factor))
+            elif incident_type in ("POTENTIAL_FORCED_MOVEMENT", "forced_movement"):
+                final_score = min(0.62, max(0.48, 0.52 + track_factor + persistence_factor))
+            else:
+                final_score = min(0.65, max(0.45, score * 0.70))
 
-        final_score = round(max(0.10, min(max_allowed, score)), 4)
+            final_score = round(final_score, 4)
+
         final_pct = int(round(final_score * 100))
 
-        # Strength tier reflects final assessment score to strictly respect the REVIEW_REQUIRED <= 0.65 ceiling
+        # Pattern tier correctly reflects pattern evidence strength percentage (e.g. 95% -> High Evidence Strength)
+        if pattern_pct >= 80:
+            pattern_tier = "High Evidence Strength"
+        elif pattern_pct >= 60:
+            pattern_tier = "Moderate Evidence Strength"
+        else:
+            pattern_tier = "Initial Observation"
+
+        # Final assessment tier reflects calibrated assessment score
         if final_pct >= 80:
-            tier = "High Evidence Strength"
+            final_tier = "High Evidence Strength"
             reliability_rating = "Validated Observation"
         elif final_pct >= 60:
-            tier = "Moderate Evidence Strength"
+            final_tier = "Moderate Evidence Strength"
             reliability_rating = "Review Required" if validation_decision == "REVIEW_REQUIRED" else "Substantiated Pattern"
         else:
-            tier = "Initial Observation"
+            final_tier = "Initial Observation"
             reliability_rating = "Review Required"
 
         verification_note = (
-            f"Pattern Evidence Strength: {pattern_pct}% ({tier}) • Final Assessment: {final_pct}% ({validation_decision}) — "
+            f"Pattern Evidence Strength: {pattern_pct}% ({pattern_tier}) • Final Assessment: {final_pct}% ({validation_decision}) — "
             f"{'Human verification required' if validation_decision == 'REVIEW_REQUIRED' else 'Sensor-grounded pattern'}"
         )
 
@@ -126,8 +158,10 @@ class IncidentScorer:
             "percentage": final_pct,
             "pattern_strength": pattern_strength,
             "pattern_percentage": pattern_pct,
-            "strength_tier": tier,
-            "evidence_strength": tier,
+            "strength_tier": final_tier,
+            "evidence_strength": final_tier,
+            "pattern_tier": pattern_tier,
+            "final_tier": final_tier,
             "reliability_rating": reliability_rating,
             "signal_count": total_signals_count,
             "unique_signal_families": len(signal_families),

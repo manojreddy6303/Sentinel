@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from "react";
-import { Case, listCases, createCase, deleteCase, updateCase } from "@/lib/api";
+import { Case, listCases, createCase, deleteCase } from "@/lib/api";
 
 interface CaseManagementViewProps {
   onOpenCase?: (caseId: string) => void;
@@ -102,120 +102,94 @@ export default function CaseManagementView({ onOpenCase, onSelectCase, onDataCha
     }
   };
 
-  // Metrics summary
-  const displayedCount = cases.length;
-  const openCount = cases.filter((c) => c.status === "OPEN" || c.status === "INVESTIGATING").length;
-  const reviewCount = cases.filter((c) => c.status === "REVIEW").length;
+  const priorityColor = (p: string) => {
+    switch (p?.toUpperCase()) {
+      case "CRITICAL":
+        return "text-rose-400 bg-rose-500/10 border-rose-500/30";
+      case "HIGH":
+        return "text-amber-400 bg-amber-500/10 border-amber-500/30";
+      case "MEDIUM":
+        return "text-[#19B89A] bg-[#19B89A]/10 border-[#19B89A]/30";
+      default:
+        return "text-[#A7AFBA] bg-[#1D2128] border-[#2A3038]";
+    }
+  };
+
+  const statusColor = (s: string) => {
+    switch (s?.toUpperCase()) {
+      case "CLOSED":
+        return "text-[#737C87] bg-[#1D2128] border-[#2A3038]";
+      case "REVIEW":
+        return "text-amber-400 bg-amber-500/10 border-amber-500/30";
+      case "INVESTIGATING":
+        return "text-[#19B89A] bg-[#19B89A]/10 border-[#19B89A]/30";
+      default:
+        return "text-[#F5F7FA] bg-[#1D2128] border-[#2A3038]";
+    }
+  };
+
+  const openCount = cases.filter((c) => c.status !== "CLOSED").length;
+  const reviewCount = cases.filter((c) => c.status === "REVIEW" || c.priority === "HIGH" || c.priority === "CRITICAL").length;
   const closedCount = cases.filter((c) => c.status === "CLOSED").length;
 
-  const getPriorityBadge = (p: string) => {
-    switch (p) {
-      case "CRITICAL":
-        return "bg-rose-500/20 text-rose-300 border-rose-600/50";
-      case "HIGH":
-        return "bg-amber-500/20 text-amber-300 border-amber-600/50";
-      case "MEDIUM":
-        return "bg-blue-500/20 text-blue-300 border-blue-600/50";
-      case "LOW":
-        return "bg-zinc-800 text-zinc-400 border-zinc-700";
-      default:
-        return "bg-zinc-800 text-zinc-400 border-zinc-700";
-    }
-  };
-
-  const getStatusBadge = (s: string) => {
-    switch (s) {
-      case "OPEN":
-        return "bg-emerald-500/20 text-emerald-300 border-emerald-600/50";
-      case "INVESTIGATING":
-        return "bg-cyan-500/20 text-cyan-300 border-cyan-600/50";
-      case "REVIEW":
-        return "bg-purple-500/20 text-purple-300 border-purple-600/50";
-      case "CLOSED":
-        return "bg-zinc-800 text-zinc-400 border-zinc-700";
-      default:
-        return "bg-zinc-800 text-zinc-300 border-zinc-700";
-    }
-  };
-
-  const priorityColor = getPriorityBadge;
-  const statusColor = getStatusBadge;
-
   return (
-    <div className="w-full h-full flex flex-col space-y-6 overflow-hidden p-6 md:p-8 max-w-[1600px] mx-auto">
-      {/* Top Banner & Stats */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-b border-zinc-800/80 pb-5">
+    <div className="p-6 md:p-8 space-y-6 max-w-[1600px] mx-auto min-h-full">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#2A3038] pb-5">
         <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2.5">
-              <span className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse" />
-              Security Case Management
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold tracking-tight text-[#F5F7FA]">
+              Security Cases
             </h1>
-            <span className="text-xs font-mono uppercase bg-emerald-950/80 text-emerald-300 px-2.5 py-0.5 rounded border border-emerald-800/50">
-              Workspace
+            <span className="text-xs font-sans font-medium bg-[#19B89A]/15 text-[#19B89A] px-2.5 py-0.5 rounded-full border border-[#19B89A]/30">
+              {totalCount} Dossiers
             </span>
           </div>
-          <p className="text-sm text-zinc-400 mt-1">
-            Multi-video investigations, cross-camera timelines, evidence bookmarks &amp; storyline tracking.
+          <p className="text-sm text-[#A7AFBA] mt-1">
+            Active investigation dossiers, cross-camera event timelines, and preserved evidence bookmarks.
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <button
-            onClick={() => setIsCreateOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-bold text-sm rounded-lg shadow-md hover:shadow-emerald-500/20 transition-all cursor-pointer"
-          >
-            <span className="text-base leading-none font-bold">+</span>
-            New Security Case
-          </button>
-        </div>
+        <button
+          onClick={() => setIsCreateOpen(true)}
+          className="flex items-center gap-2 px-5 py-2.5 bg-[#19B89A] hover:bg-[#16A489] text-[#0F1115] font-semibold text-xs rounded-lg transition-colors cursor-pointer shadow-sm"
+        >
+          <span>+ Start New Case</span>
+        </button>
       </div>
 
       {/* Metrics Row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3 rounded-lg flex items-center justify-between">
-          <div>
-            <div className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">Total Cases</div>
-            <div className="text-xl font-bold text-white font-mono mt-0.5">{totalCount}</div>
-          </div>
-          <span className="text-xl opacity-70">📂</span>
+        <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl space-y-1">
+          <div className="text-xs text-[#737C87]">Total Cases</div>
+          <div className="text-2xl font-bold text-[#F5F7FA] font-mono">{totalCount}</div>
         </div>
 
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3 rounded-lg flex items-center justify-between">
-          <div>
-            <div className="text-[11px] font-mono text-emerald-400 uppercase tracking-wider">Active / Open</div>
-            <div className="text-xl font-bold text-emerald-300 font-mono mt-0.5">{openCount}</div>
-          </div>
-          <span className="text-xl text-emerald-400 opacity-70">🔍</span>
+        <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl space-y-1">
+          <div className="text-xs text-[#737C87]">Active / Open</div>
+          <div className="text-2xl font-bold text-[#19B89A] font-mono">{openCount}</div>
         </div>
 
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3 rounded-lg flex items-center justify-between">
-          <div>
-            <div className="text-[11px] font-mono text-purple-400 uppercase tracking-wider">Review Required</div>
-            <div className="text-xl font-bold text-purple-300 font-mono mt-0.5">{reviewCount}</div>
-          </div>
-          <span className="text-xl text-purple-400 opacity-70">⚖️</span>
+        <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl space-y-1">
+          <div className="text-xs text-[#737C87]">Review Required</div>
+          <div className="text-2xl font-bold text-amber-400 font-mono">{reviewCount}</div>
         </div>
 
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3 rounded-lg flex items-center justify-between">
-          <div>
-            <div className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">Closed Cases</div>
-            <div className="text-xl font-bold text-zinc-300 font-mono mt-0.5">{closedCount}</div>
-          </div>
-          <span className="text-xl text-zinc-500 opacity-70">🔒</span>
+        <div className="bg-[#171A20] border border-[#2A3038] p-4 rounded-xl space-y-1">
+          <div className="text-xs text-[#737C87]">Closed Dossiers</div>
+          <div className="text-2xl font-bold text-[#737C87] font-mono">{closedCount}</div>
         </div>
       </div>
 
       {/* Filter Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-zinc-900/60 p-2.5 rounded-lg border border-zinc-800/80 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-[#171A20] p-3 rounded-xl border border-[#2A3038] text-xs">
         <div className="flex items-center gap-2 flex-1 min-w-[240px]">
-          <span className="text-zinc-500 text-sm">🔎</span>
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by title, case number, or keywords..."
-            className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1 text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 text-xs"
+            placeholder="Search by case title, case number, or keywords..."
+            className="w-full bg-[#1D2128] border border-[#2A3038] rounded-lg px-3 py-1.5 text-[#F5F7FA] placeholder-[#737C87] focus:outline-none focus:border-[#19B89A] text-xs"
           />
         </div>
 
@@ -223,7 +197,7 @@ export default function CaseManagementView({ onOpenCase, onSelectCase, onDataCha
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1 text-zinc-300 focus:outline-none focus:border-emerald-500 text-xs"
+            className="bg-[#1D2128] border border-[#2A3038] rounded-lg px-2.5 py-1.5 text-[#F5F7FA] focus:outline-none focus:border-[#19B89A] text-xs"
           >
             <option value="">Status: All</option>
             <option value="OPEN">Open</option>
@@ -235,7 +209,7 @@ export default function CaseManagementView({ onOpenCase, onSelectCase, onDataCha
           <select
             value={priorityFilter}
             onChange={(e) => setPriorityFilter(e.target.value)}
-            className="bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1 text-zinc-300 focus:outline-none focus:border-emerald-500 text-xs"
+            className="bg-[#1D2128] border border-[#2A3038] rounded-lg px-2.5 py-1.5 text-[#F5F7FA] focus:outline-none focus:border-[#19B89A] text-xs"
           >
             <option value="">Priority: All</option>
             <option value="CRITICAL">Critical</option>
@@ -251,7 +225,7 @@ export default function CaseManagementView({ onOpenCase, onSelectCase, onDataCha
                 setStatusFilter("");
                 setPriorityFilter("");
               }}
-              className="text-zinc-400 hover:text-zinc-200 px-2 py-1 text-xs cursor-pointer"
+              className="text-[#737C87] hover:text-[#F5F7FA] px-2 py-1 text-xs cursor-pointer"
             >
               Reset
             </button>
@@ -259,110 +233,84 @@ export default function CaseManagementView({ onOpenCase, onSelectCase, onDataCha
         </div>
       </div>
 
-      {/* Case List Grid */}
-      <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
+      {/* Case Dossiers Grid */}
+      <div>
         {loading ? (
-          <div className="flex flex-col items-center justify-center py-20 text-zinc-500 space-y-2">
-            <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-xs font-mono">Loading cases...</span>
+          <div className="flex flex-col items-center justify-center py-20 text-[#737C87] space-y-2">
+            <div className="w-6 h-6 border-2 border-[#19B89A] border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs">Loading cases...</span>
           </div>
         ) : error ? (
-          <div className="p-4 bg-rose-950/30 border border-rose-800/50 rounded-lg text-rose-300 text-xs">
-            Error loading cases: {error}
+          <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs">
+            {error}
           </div>
         ) : cases.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center bg-zinc-900/30 border border-dashed border-zinc-800 rounded-xl p-8 space-y-3">
-            <div className="text-3xl opacity-60">📁</div>
-            <div className="text-sm font-semibold text-zinc-300">No Forensic Cases Found</div>
-            <p className="text-xs text-zinc-500 max-w-sm">
-              {searchQuery || statusFilter || priorityFilter
-                ? "No cases match your active filters. Try resetting search criteria."
-                : "Create your first forensic case to organize multi-camera surveillance footage, build unified timelines, and preserve evidence."}
+          <div className="flex flex-col items-center justify-center py-16 text-center bg-[#171A20] border border-dashed border-[#2A3038] rounded-xl p-8 space-y-3">
+            <div className="text-sm font-semibold text-[#F5F7FA]">No security cases found</div>
+            <p className="text-xs text-[#737C87] max-w-sm">
+              Create your first security case to organize surveillance footage, correlate timelines, and preserve findings.
             </p>
             <button
               onClick={() => setIsCreateOpen(true)}
-              className="mt-2 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-semibold text-xs rounded-lg transition-colors cursor-pointer"
+              className="mt-2 px-4 py-2 bg-[#19B89A] hover:bg-[#16A489] text-[#0F1115] font-semibold text-xs rounded-lg transition-colors cursor-pointer"
             >
               Create New Case
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {cases.map((c) => (
               <div
                 key={c.id}
                 onClick={() => handleOpenCase(c.id)}
-                className="group bg-zinc-900/80 hover:bg-zinc-900 border border-zinc-800 hover:border-zinc-700 rounded-xl p-4 transition-all duration-150 cursor-pointer flex flex-col justify-between space-y-3 relative shadow-sm"
+                className="group bg-[#171A20] hover:bg-[#1D2128] border border-[#2A3038] hover:border-[#3A424E] rounded-xl p-5 transition-all cursor-pointer flex flex-col justify-between space-y-4 shadow-sm"
               >
-                <div>
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="font-mono text-[11px] text-zinc-400 font-semibold tracking-wider">
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs text-[#19B89A] font-semibold">
                       {c.case_number}
                     </span>
                     <div className="flex items-center gap-1.5">
-                      <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${priorityColor(c.priority)}`}>
+                      <span className={`text-[10px] font-medium px-2 py-0.5 rounded border ${priorityColor(c.priority)}`}>
                         {c.priority}
                       </span>
-                      <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${statusColor(c.status)}`}>
+                      <span className={`text-[10px] font-medium px-2 py-0.5 rounded border ${statusColor(c.status)}`}>
                         {c.status}
                       </span>
                     </div>
                   </div>
 
-                  <h3 className="text-sm font-bold text-zinc-100 group-hover:text-emerald-300 transition-colors mt-1.5 leading-snug">
+                  <h3 className="text-base font-bold text-[#F5F7FA] group-hover:text-[#19B89A] transition-colors leading-snug">
                     {c.title}
                   </h3>
 
                   {c.description && (
-                    <p className="text-xs text-zinc-400 line-clamp-2 mt-1 leading-relaxed">
+                    <p className="text-xs text-[#A7AFBA] line-clamp-2 leading-relaxed">
                       {c.description}
                     </p>
                   )}
-
-                  {/* Tags */}
-                  {c.tags && c.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2.5">
-                      {c.tags.slice(0, 4).map((tag, idx) => (
-                        <span
-                          key={idx}
-                          className="text-[10px] font-mono bg-zinc-800/80 text-zinc-400 px-1.5 py-0.5 rounded border border-zinc-700/50"
-                        >
-                          #{tag}
-                        </span>
-                      ))}
-                      {c.tags.length > 4 && (
-                        <span className="text-[10px] font-mono text-zinc-500 self-center">
-                          +{c.tags.length - 4}
-                        </span>
-                      )}
-                    </div>
-                  )}
                 </div>
 
-                {/* Footer Entity Counts & Actions */}
-                <div className="pt-2.5 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-500 font-mono">
-                  <div className="flex items-center gap-2.5">
-                    <span title="Linked Videos" className="flex items-center gap-1 text-zinc-400">
-                      🎥 {c.counts?.videos ?? 0}
-                    </span>
-                    <span title="Linked Incidents" className="flex items-center gap-1 text-zinc-400">
-                      ⚠️ {c.counts?.incidents ?? 0}
-                    </span>
-                    <span title="Bookmarks" className="flex items-center gap-1 text-zinc-400">
-                      📌 {c.counts?.bookmarks ?? 0}
-                    </span>
-                    <span title="Notes" className="flex items-center gap-1 text-zinc-400">
-                      📝 {c.counts?.notes ?? 0}
-                    </span>
+                {/* Secondary Information & Open Action */}
+                <div className="pt-3 border-t border-[#2A3038] flex items-center justify-between text-xs">
+                  <div className="text-[#737C87] text-[11px] font-mono">
+                    <span>{c.counts?.videos ?? 0} videos</span>
+                    <span className="mx-1">&bull;</span>
+                    <span>{c.counts?.incidents ?? 0} incidents</span>
+                    <span className="mx-1">&bull;</span>
+                    <span>{c.counts?.evidence ?? 0} evidence</span>
                   </div>
 
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[#19B89A] font-medium group-hover:translate-x-0.5 transition-transform flex items-center gap-1">
+                      Open Case &rarr;
+                    </span>
                     <button
                       onClick={(e) => handleDelete(e, c.id, c.case_number)}
-                      title="Delete Case"
-                      className="text-zinc-500 hover:text-rose-400 p-1 rounded transition-colors cursor-pointer"
+                      className="text-[#737C87] hover:text-rose-400 p-1 rounded transition-colors"
+                      title="Delete case"
                     >
-                      🗑️
+                      &times;
                     </button>
                   </div>
                 </div>
@@ -375,59 +323,54 @@ export default function CaseManagementView({ onOpenCase, onSelectCase, onDataCha
       {/* Create Case Modal */}
       {isCreateOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-lg w-full p-5 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-              <h2 className="text-base font-bold text-white flex items-center gap-2">
-                <span className="text-emerald-400">+</span>
-                Create New Forensic Case
-              </h2>
+          <div className="bg-[#171A20] border border-[#2A3038] rounded-xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#2A3038] pb-3">
+              <h3 className="text-base font-bold text-[#F5F7FA]">Start New Security Case</h3>
               <button
                 onClick={() => setIsCreateOpen(false)}
-                className="text-zinc-500 hover:text-zinc-300 text-lg leading-none cursor-pointer"
+                className="text-[#737C87] hover:text-[#F5F7FA] text-lg cursor-pointer"
               >
-                &times;
+                ✕
               </button>
             </div>
 
             {createError && (
-              <div className="p-2.5 bg-rose-950/50 border border-rose-800 text-rose-300 text-xs rounded">
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-rose-300 text-xs">
                 {createError}
               </div>
             )}
 
-            <form onSubmit={handleCreateSubmit} className="space-y-3.5 text-xs">
+            <form onSubmit={handleCreateSubmit} className="space-y-4 text-xs">
               <div>
-                <label className="block text-zinc-300 font-medium mb-1">
-                  Case Title <span className="text-rose-400">*</span>
-                </label>
+                <label className="block text-[#737C87] mb-1 font-medium">Case Title *</label>
                 <input
                   type="text"
                   required
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="e.g. North Gate Unauthorized Breach Investigation"
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 text-xs"
+                  placeholder="e.g. North Gate Perimeter Intrusion Investigation"
+                  className="w-full bg-[#1D2128] border border-[#2A3038] rounded-lg p-2.5 text-[#F5F7FA] placeholder-[#737C87] focus:outline-none focus:border-[#19B89A]"
                 />
               </div>
 
               <div>
-                <label className="block text-zinc-300 font-medium mb-1">Description / Brief</label>
+                <label className="block text-[#737C87] mb-1 font-medium">Description</label>
                 <textarea
                   rows={3}
                   value={newDesc}
                   onChange={(e) => setNewDesc(e.target.value)}
-                  placeholder="Brief synopsis of the incident, source CCTV, and initial observations..."
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 text-xs"
+                  placeholder="Investigation summary, operational context, and initial findings..."
+                  className="w-full bg-[#1D2128] border border-[#2A3038] rounded-lg p-2.5 text-[#F5F7FA] placeholder-[#737C87] focus:outline-none focus:border-[#19B89A] resize-none"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-zinc-300 font-medium mb-1">Priority</label>
+                  <label className="block text-[#737C87] mb-1 font-medium">Priority</label>
                   <select
                     value={newPriority}
-                    onChange={(e: any) => setNewPriority(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-zinc-200 focus:outline-none focus:border-emerald-500 text-xs"
+                    onChange={(e) => setNewPriority(e.target.value as any)}
+                    className="w-full bg-[#1D2128] border border-[#2A3038] rounded-lg p-2.5 text-[#F5F7FA] focus:outline-none focus:border-[#19B89A]"
                   >
                     <option value="LOW">Low</option>
                     <option value="MEDIUM">Medium</option>
@@ -437,42 +380,30 @@ export default function CaseManagementView({ onOpenCase, onSelectCase, onDataCha
                 </div>
 
                 <div>
-                  <label className="block text-zinc-300 font-medium mb-1">Security Analyst</label>
+                  <label className="block text-[#737C87] mb-1 font-medium">Assigned Investigator</label>
                   <input
                     type="text"
                     value={newInvestigator}
                     onChange={(e) => setNewInvestigator(e.target.value)}
-                    placeholder="Analyst Name"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-zinc-200 focus:outline-none focus:border-emerald-500 text-xs"
+                    className="w-full bg-[#1D2128] border border-[#2A3038] rounded-lg p-2.5 text-[#F5F7FA] focus:outline-none focus:border-[#19B89A]"
                   />
                 </div>
               </div>
 
-              <div>
-                <label className="block text-zinc-300 font-medium mb-1">Tags (comma-separated)</label>
-                <input
-                  type="text"
-                  value={newTags}
-                  onChange={(e) => setNewTags(e.target.value)}
-                  placeholder="Theft, Perimeter, Loading Bay, Night Shift"
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-zinc-200 focus:outline-none focus:border-emerald-500 text-xs"
-                />
-              </div>
-
-              <div className="pt-3 border-t border-zinc-800 flex items-center justify-end gap-2">
+              <div className="flex justify-end gap-2 pt-3 border-t border-[#2A3038]">
                 <button
                   type="button"
                   onClick={() => setIsCreateOpen(false)}
-                  className="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg transition-colors cursor-pointer"
+                  className="px-4 py-2 bg-[#1D2128] hover:bg-[#2A3038] text-[#F5F7FA] rounded-lg font-medium cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-zinc-950 font-semibold rounded-lg transition-colors cursor-pointer"
+                  className="px-5 py-2 bg-[#19B89A] hover:bg-[#16A489] text-[#0F1115] font-semibold rounded-lg cursor-pointer transition-colors"
                 >
-                  {isSubmitting ? "Creating..." : "Create Case"}
+                  {isSubmitting ? "Creating..." : "Create Case Dossier"}
                 </button>
               </div>
             </form>

@@ -1,28 +1,94 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-  --font-geist-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-  --font-geist-mono: ui-monospace, "Cascadia Code", "Cascadia Mono", "Segoe UI Mono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --background: #0F1115;
+  --surface-primary: #171A20;
+  --surface-secondary: #1D2128;
+  --border-subtle: #2A3038;
+  --text-primary: #F5F7FA;
+  --text-secondary: #A7AFBA;
+  --text-muted: #737C87;
+  --accent-teal: #19B89A;
+  --accent-teal-hover: #16A489;
+  --font-system-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-system-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
 @theme inline {
   --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-surface-primary: var(--surface-primary);
+  --color-surface-secondary: var(--surface-secondary);
+  --color-border-subtle: var(--border-subtle);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-teal-accent: var(--accent-teal);
+  --font-sans: var(--font-system-sans);
+  --font-mono: var(--font-system-mono);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans);
+  background-color: #0F1115;
+  color: #F5F7FA;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+  letter-spacing: -0.01em;
+}
+
+/* Custom Sleek Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0F1115;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2A3038;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3A424E;
+}
+
+/* Reusable Sentinel Design System Classes */
+.sentinel-surface {
+  background-color: #171A20;
+  border: 1px solid #2A3038;
+  border-radius: 0.75rem;
+}
+
+.sentinel-surface-secondary {
+  background-color: #1D2128;
+  border: 1px solid #2A3038;
+  border-radius: 0.75rem;
+}
+
+.sentinel-btn-primary {
+  background-color: #19B89A;
+  color: #0F1115;
+  font-weight: 600;
+  border-radius: 0.5rem;
+  transition: all 0.15s ease-in-out;
+}
+
+.sentinel-btn-primary:hover {
+  background-color: #16A489;
+}
+
+.sentinel-btn-secondary {
+  background-color: #171A20;
+  color: #F5F7FA;
+  border: 1px solid #2A3038;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  transition: all 0.15s ease-in-out;
+}
+
+.sentinel-btn-secondary:hover {
+  background-color: #1D2128;
+  border-color: #3A424E;
 }

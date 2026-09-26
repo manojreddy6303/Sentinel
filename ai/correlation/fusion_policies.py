@@ -128,6 +128,7 @@ class VehicleCorrelationPolicy:
             if all_neg_ev:
                 score = max(0.2, score - 0.15 * len(all_neg_ev))
 
+            pattern_str = max([getattr(c, "pattern_evidence_strength", getattr(c, "confidence", 0.0)) for c in all_cands] + [max_conf])
             if val_dec == "REVIEW_REQUIRED":
                 score = min(score, 0.65)
                 rel_rating = "MODERATE"
@@ -160,9 +161,10 @@ class VehicleCorrelationPolicy:
                 end_time=end_t,
                 duration=dur,
                 severity="HIGH",
-                confidence=max_conf,
+                confidence=score,
                 assessment_score=score,
                 evidence_strength=ev_str,
+                pattern_evidence_strength=pattern_str,
                 reliability_rating=rel_rating,
                 validation_decision=val_dec,
                 primary_track_ids=all_tracks,
@@ -175,6 +177,7 @@ class VehicleCorrelationPolicy:
                 evidence_ids=all_evidence_ids,
                 relationships=matched_rels,
                 contextual_factors={
+                    "pattern_evidence_strength": pattern_str,
                     "supporting_telemetry_window": {
                         "start_time": telemetry_start,
                         "end_time": telemetry_end,
@@ -221,6 +224,7 @@ class VehicleCorrelationPolicy:
             nc_classes = list(set(sum([c.object_classes for c in nc_cluster], [])))
             nc_signals = [s.to_dict() for c in nc_cluster for s in c.supporting_signals]
             raw_conf = max(c.confidence for c in nc_cluster)
+            pattern_str = max([getattr(c, "pattern_evidence_strength", c.confidence) for c in nc_cluster] + [raw_conf])
             score = min(raw_conf, 0.65)  # Enforce Sentinel 0.65 review ceiling
 
             ci = CorrelatedIncident(
@@ -232,9 +236,10 @@ class VehicleCorrelationPolicy:
                 end_time=nc_end,
                 duration=nc_dur,
                 severity="NORMAL",
-                confidence=raw_conf,
+                confidence=score,
                 assessment_score=score,
                 evidence_strength=score * 0.8,
+                pattern_evidence_strength=pattern_str,
                 reliability_rating="MODERATE",
                 validation_decision="REVIEW_REQUIRED",
                 primary_track_ids=nc_tracks,
@@ -242,6 +247,7 @@ class VehicleCorrelationPolicy:
                 source_candidate_ids=[c.incident_id for c in nc_cluster],
                 source_detector_ids=list(set(c.detector_name for c in nc_cluster)),
                 supporting_signals=nc_signals[:10],
+                contextual_factors={"pattern_evidence_strength": pattern_str},
                 relationships=[],
                 storyline=IncidentStorylineGenerator.generate_storyline(
                     category="vehicle",
@@ -277,9 +283,10 @@ class VehicleCorrelationPolicy:
                     end_time=cand.end_time,
                     duration=cand.duration,
                     severity=cand.severity,
-                    confidence=cand.confidence,
+                    confidence=score,
                     assessment_score=score,
                     evidence_strength=score * 0.8,
+                    pattern_evidence_strength=getattr(cand, "pattern_evidence_strength", cand.confidence),
                     reliability_rating="HIGH" if score >= 0.80 else "MODERATE",
                     validation_decision=val_dec,
                     primary_track_ids=cand.track_ids,
@@ -352,6 +359,7 @@ class PropertyCorrelationPolicy:
                 score = max(0.2, score - 0.15 * len(all_neg_ev))
 
             # Review ceiling cap: strictly capped at 0.65 per Sentinel reliability policy
+            pattern_str = max([getattr(c, "pattern_evidence_strength", getattr(c, "confidence", 0.0)) for c in all_cands] + [max_conf])
             if val_dec == "REVIEW_REQUIRED":
                 score = min(score, 0.65)
                 rel_rating = "MODERATE"
@@ -384,9 +392,10 @@ class PropertyCorrelationPolicy:
                 end_time=end_t,
                 duration=dur,
                 severity=lead.severity,
-                confidence=max_conf,
+                confidence=score,
                 assessment_score=score,
                 evidence_strength=ev_str,
+                pattern_evidence_strength=pattern_str,
                 reliability_rating=rel_rating,
                 validation_decision=val_dec,
                 primary_track_ids=all_tracks[:2],
@@ -399,6 +408,7 @@ class PropertyCorrelationPolicy:
                 evidence_ids=all_evidence_ids,
                 relationships=matched_rels,
                 storyline=storyline,
+                contextual_factors={"pattern_evidence_strength": pattern_str},
                 provenance_graph={"stage_sequence": ["stationary", "approach", "interaction", "disappearance"], "intermediate_count": len(intermediates)},
             )
             correlated.append(ci)
@@ -407,6 +417,7 @@ class PropertyCorrelationPolicy:
             for cand in prop_cands:
                 val_dec = inherit_validation_decision([cand])
                 score = cand.confidence
+                pattern_str = getattr(cand, "pattern_evidence_strength", cand.confidence)
                 if val_dec == "REVIEW_REQUIRED":
                     score = min(score, 0.65)
                     rel_rating = "MODERATE"
@@ -423,9 +434,10 @@ class PropertyCorrelationPolicy:
                     end_time=cand.end_time,
                     duration=cand.duration,
                     severity=cand.severity,
-                    confidence=cand.confidence,
+                    confidence=score,
                     assessment_score=score,
                     evidence_strength=ev_str,
+                    pattern_evidence_strength=pattern_str,
                     reliability_rating=rel_rating,
                     validation_decision=val_dec,
                     primary_track_ids=cand.track_ids,
@@ -498,6 +510,7 @@ class PersonCorrelationPolicy:
                 validation_decision="REVIEW_REQUIRED",
             )
 
+            pattern_str = max([getattr(c, "pattern_evidence_strength", getattr(c, "confidence", 0.0)) for c in falls] + [max_conf])
             ci = CorrelatedIncident(
                 incident_id=f"CORR-PERS-POSTURE-{uuid.uuid4().hex[:8]}",
                 video_id=video_id,
@@ -507,9 +520,10 @@ class PersonCorrelationPolicy:
                 end_time=end_t,
                 duration=dur,
                 severity="HIGH",
-                confidence=max_conf,
+                confidence=min(max_conf, 0.65),
                 assessment_score=min(max_conf, 0.65),
                 evidence_strength=min(max_conf * 0.85, 0.65),
+                pattern_evidence_strength=pattern_str,
                 reliability_rating="MODERATE",
                 validation_decision="REVIEW_REQUIRED",
                 primary_track_ids=tracks,
@@ -525,6 +539,7 @@ class PersonCorrelationPolicy:
         for op in other_person:
             val_dec = inherit_validation_decision([op])
             score = op.confidence
+            pattern_str = getattr(op, "pattern_evidence_strength", op.confidence)
             if val_dec == "REVIEW_REQUIRED":
                 score = min(score, 0.65)
                 rel_rating = "MODERATE"
@@ -541,9 +556,10 @@ class PersonCorrelationPolicy:
                 end_time=op.end_time,
                 duration=op.duration,
                 severity=op.severity,
-                confidence=op.confidence,
+                confidence=score,
                 assessment_score=score,
                 evidence_strength=ev_str,
+                pattern_evidence_strength=pattern_str,
                 reliability_rating=rel_rating,
                 validation_decision=val_dec,
                 primary_track_ids=op.track_ids,
@@ -620,6 +636,7 @@ class CrowdZoneCorrelationPolicy:
             lead = cluster[0]
 
             val_dec = inherit_validation_decision(cluster)
+            pattern_str = max([getattr(c, "pattern_evidence_strength", getattr(c, "confidence", 0.0)) for c in cluster] + [max_conf])
             score = max_conf
             if val_dec == "REVIEW_REQUIRED":
                 score = min(score, 0.65)
@@ -653,9 +670,10 @@ class CrowdZoneCorrelationPolicy:
                 end_time=end_t,
                 duration=dur,
                 severity=lead.severity,
-                confidence=max_conf,
+                confidence=score,
                 assessment_score=score,
                 evidence_strength=ev_str,
+                pattern_evidence_strength=pattern_str,
                 reliability_rating=rel_rating,
                 validation_decision=val_dec,
                 primary_track_ids=tracks[:5],
@@ -666,6 +684,7 @@ class CrowdZoneCorrelationPolicy:
                 supporting_signals=signals[:10],
                 storyline=storyline,
                 contextual_factors={
+                    "pattern_evidence_strength": pattern_str,
                     "supporting_telemetry_window": {
                         "start_time": broad_start,
                         "end_time": broad_end,
@@ -720,7 +739,9 @@ class SpecializedVisualPolicy:
             max_e = max(c.end_time for c in all_fs)
             dur = max(0.0, max_e - min_s)
             val_dec = inherit_validation_decision(all_fs)
-            score = min(max(c.confidence for c in all_fs), 0.65) if val_dec == "REVIEW_REQUIRED" else max(c.confidence for c in all_fs)
+            raw_conf = max(c.confidence for c in all_fs)
+            pattern_str = max([getattr(c, "pattern_evidence_strength", getattr(c, "confidence", 0.0)) for c in all_fs] + [raw_conf])
+            score = min(raw_conf, 0.65) if val_dec == "REVIEW_REQUIRED" else raw_conf
 
             storyline = (
                 f"At {min_s:.1f}s, localized fire visual evidence was observed and accompanied by concurrent smoke plume dynamics. "
@@ -736,9 +757,10 @@ class SpecializedVisualPolicy:
                 end_time=max_e,
                 duration=dur,
                 severity="HIGH",
-                confidence=max(c.confidence for c in all_fs),
+                confidence=score,
                 assessment_score=score,
                 evidence_strength=score * 0.95,
+                pattern_evidence_strength=pattern_str,
                 reliability_rating="HIGH" if score >= 0.80 and val_dec == "ACCEPTED" else "MODERATE",
                 validation_decision=val_dec,
                 evidence_ids=combined_ev,
@@ -754,6 +776,7 @@ class SpecializedVisualPolicy:
                 ev_ids = sc.incident_metadata.get("evidence_ids", [])
                 val_dec = inherit_validation_decision([sc])
                 score = sc.confidence
+                pattern_str = getattr(sc, "pattern_evidence_strength", sc.confidence)
                 if val_dec == "REVIEW_REQUIRED":
                     score = min(score, 0.65)
                     rel_rating = "MODERATE"
@@ -771,9 +794,10 @@ class SpecializedVisualPolicy:
                     end_time=sc.end_time,
                     duration=sc.duration,
                     severity=sc.severity,
-                    confidence=sc.confidence,
+                    confidence=score,
                     assessment_score=score,
                     evidence_strength=ev_str,
+                    pattern_evidence_strength=pattern_str,
                     reliability_rating=rel_rating,
                     validation_decision=val_dec,
                     primary_track_ids=sc.track_ids,

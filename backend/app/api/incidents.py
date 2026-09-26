@@ -63,6 +63,15 @@ def list_incidents(
             # Review requirement flag: True if <= 0.65 or decision is REVIEW_REQUIRED
             review_required = (inc.assessment_score <= 0.65) or (inc.validation_decision == "REVIEW_REQUIRED")
 
+            clean_storyline = inc.storyline or ""
+            if review_required and clean_storyline:
+                clean_storyline = clean_storyline.replace("a verified potential forced movement pattern", "a detected potential forced movement pattern supported by validated physical signals")
+                clean_storyline = clean_storyline.replace("a verified prolonged presence pattern", "a detected prolonged presence pattern supported by validated physical signals")
+                clean_storyline = clean_storyline.replace("a verified theft pattern", "a potential object-takeaway pattern supported by validated physical signals")
+                clean_storyline = clean_storyline.replace("verified potential object-takeaway pattern", "potential object-takeaway pattern supported by validated physical signals")
+                clean_storyline = clean_storyline.replace("verified incident", "detected incident pattern")
+                clean_storyline = clean_storyline.replace("verified physical signal", "validated physical signal")
+
             results.append({
                 "id": inc.id,
                 "incident_id": inc.id,
@@ -76,11 +85,15 @@ def list_incidents(
                 "duration": inc.duration,
                 "assessment_score": inc.assessment_score,
                 "evidence_strength": inc.evidence_strength,
+                "pattern_evidence_strength": (inc.contextual_factors or {}).get("pattern_evidence_strength", inc.evidence_strength) if isinstance(inc.contextual_factors, dict) else inc.evidence_strength,
+                "confidence": inc.assessment_score,
+                "incident_score": inc.assessment_score,
+                "score": inc.assessment_score,
                 "reliability_rating": inc.reliability_rating,
                 "validation_decision": inc.validation_decision,
                 "decision": inc.validation_decision,
-                "storyline": inc.storyline,
-                "narrative": inc.storyline,
+                "storyline": clean_storyline,
+                "narrative": clean_storyline,
                 "primary_track_ids": inc.primary_track_ids or [],
                 "supporting_track_ids": inc.supporting_track_ids or [],
                 "participating_tracks": tracks,

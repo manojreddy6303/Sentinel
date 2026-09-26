@@ -121,6 +121,14 @@ class VideoProcessor:
         frame_count = meta["frame_count"]
         if fps <= 0:
             raise VideoEmptyError(f"Video has invalid FPS ({fps}).")
+        if frame_count <= 0 and meta.get("is_decodable"):
+            dur = meta.get("duration_seconds", 0.0)
+            if dur > 0 and fps > 0:
+                frame_count = max(1, int(round(dur * fps)))
+                meta["frame_count"] = frame_count
+            else:
+                frame_count = 1
+                meta["frame_count"] = 1
         if frame_count <= 0:
             raise VideoEmptyError("Video has zero frames.")
 

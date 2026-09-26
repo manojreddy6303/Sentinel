@@ -354,9 +354,13 @@ class SecurityEvent:
     category: Optional[str] = None
     human_verification_required: bool = True
     validation_decision: str = "ACCEPTED"
+    pattern_evidence_strength: Optional[float] = None
+    assessment_score: Optional[float] = None
     incident_metadata: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        p_str = self.pattern_evidence_strength if self.pattern_evidence_strength is not None else self.confidence
+        a_score = self.assessment_score if self.assessment_score is not None else self.confidence
         res = {
             "event_id": self.event_id,
             "event_type": self.event_type,
@@ -364,6 +368,8 @@ class SecurityEvent:
             "timestamp": round(self.timestamp, 4),
             "duration_seconds": round(self.duration_seconds, 4),
             "confidence": round(self.confidence, 4),
+            "pattern_evidence_strength": round(float(p_str), 4),
+            "assessment_score": round(float(a_score), 4),
             "description": self.description,
             "observable_signals": self.observable_signals,
             "track_id": self.track_id,

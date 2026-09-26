@@ -188,7 +188,9 @@ class IncidentCandidate:
     end_time: float
     duration: float
     severity: str  # LOW, NORMAL, HIGH
-    confidence: float  # 0.0 to 1.0
+    confidence: float  # 0.0 to 1.0 (calibrated assessment score)
+    pattern_evidence_strength: float = 0.5  # Uncapped multi-signal telemetry evidence strength
+    assessment_score: float = 0.5  # Calibrated final assessment score
     track_ids: List[str] = field(default_factory=list)
     object_classes: List[str] = field(default_factory=list)
     source_detection_ids: List[str] = field(default_factory=list)
@@ -219,10 +221,13 @@ class IncidentCandidate:
         if self.contradictory_signals:
             for cs in self.contradictory_signals:
                 signals_text.append(f"{cs.signal_type}: {cs.description}")
-        if self.human_verification_required:
-            score_pct = int(round(self.confidence * 100))
-            status_tag = f" ({self.validation_decision})" if self.validation_decision != "ACCEPTED" else ""
-            signals_text.append(f"Incident Score: {score_pct}%{status_tag} — Human verification required")
+        
+        # Authoritative score telemetry: do not mix ACCEPTED with REVIEW_REQUIRED
+        final_pct = int(round(self.assessment_score * 100))
+        if self.validation_decision == "REVIEW_REQUIRED":
+            signals_text.append(f"Final Assessment: {final_pct}% (REVIEW_REQUIRED) — Human verification required")
+        elif self.validation_decision == "ACCEPTED":
+            signals_text.append(f"Final Assessment: {final_pct}% (ACCEPTED)")
 
         primary_track = self.track_ids[0] if self.track_ids else None
         primary_class = self.object_classes[0] if self.object_classes else None
@@ -256,6 +261,8 @@ class IncidentCandidate:
             incident_metadata={
                 "incident_id": self.incident_id,
                 "category": self.category,
+                "pattern_evidence_strength": self.pattern_evidence_strength,
+                "assessment_score": self.assessment_score,
                 "track_ids": self.track_ids,
                 "object_classes": self.object_classes,
                 "evidence_candidates": [e.to_dict() for e in self.evidence_candidates],

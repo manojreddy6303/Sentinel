@@ -92,6 +92,7 @@ class CorrelatedIncident:
     confidence: float = 0.5  # [0.0, 1.0]
     assessment_score: float = 0.5  # Calibrated non-probabilistic semantic score [0.0, 1.0]
     evidence_strength: float = 0.5  # Empirical signal strength [0.0, 1.0]
+    pattern_evidence_strength: float = 0.5  # Multi-signal pattern evidence strength [0.0, 1.0]
     reliability_rating: str = "MEDIUM"  # "HIGH", "MEDIUM", "LOW"
     validation_decision: str = "REVIEW_REQUIRED"  # "ACCEPTED", "REVIEW_REQUIRED", "ABSTAINED"
 
@@ -131,6 +132,7 @@ class CorrelatedIncident:
             "confidence": round(float(self.confidence), 4),
             "assessment_score": round(float(self.assessment_score), 4),
             "evidence_strength": round(float(self.evidence_strength), 4),
+            "pattern_evidence_strength": round(float(self.pattern_evidence_strength), 4),
             "reliability_rating": self.reliability_rating,
             "validation_decision": self.validation_decision,
             "primary_track_ids": self.primary_track_ids,

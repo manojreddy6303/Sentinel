@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from fastapi import HTTPException, Response, status
 from fastapi.responses import StreamingResponse
@@ -84,6 +84,9 @@ def get_ffmpeg_binary() -> Optional[str]:
     return None
 
 
+_compat_cache: Dict[str, Tuple[float, bool]] = {}
+
+
 def is_browser_compatible(video_path: Path) -> bool:
     """
     Check whether a video is already directly playable by standard HTML5 video in Chrome/Edge.
@@ -99,35 +102,16 @@ def is_browser_compatible(video_path: Path) -> bool:
     if suffix not in (".mp4", ".webm"):
         return False
 
-    ffmpeg_exe = get_ffmpeg_binary()
-    if ffmpeg_exe:
-        try:
-            # Probe stream info using ffmpeg -i
-            probe = subprocess.run(
-                [ffmpeg_exe, "-i", str(video_path)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            stderr_lower = probe.stderr.lower()
+    try:
+        mtime = video_path.stat().st_mtime
+        cache_key = str(video_path.resolve())
+        if cache_key in _compat_cache and _compat_cache[cache_key][0] == mtime:
+            return _compat_cache[cache_key][1]
+    except Exception:
+        mtime = 0.0
+        cache_key = str(video_path)
 
-            # Explicitly detect incompatible codecs
-            if "video: hevc" in stderr_lower or "video: h265" in stderr_lower or "hev1" in stderr_lower:
-                return False
-
-            # Check if H.264 / avc1 is present with standard yuv420p pixel format
-            if suffix == ".mp4":
-                if ("video: h264" in stderr_lower or "avc1" in stderr_lower) and "yuv420p" in stderr_lower:
-                    return True
-            elif suffix == ".webm":
-                if "video: vp8" in stderr_lower or "video: vp9" in stderr_lower or "video: av1" in stderr_lower:
-                    return True
-
-            return False
-        except Exception as exc:
-            logger.warning(f"ffmpeg probe error for {video_path}: {exc}")
-
-    # Fallback to OpenCV FourCC inspection
+    # 1. Fast-path: OpenCV FourCC inspection (sub-millisecond)
     try:
         import cv2
         cap = cv2.VideoCapture(str(video_path))
@@ -136,12 +120,45 @@ def is_browser_compatible(video_path: Path) -> bool:
             cap.release()
             fourcc_str = "".join([chr((fourcc_int >> 8 * i) & 0xFF) for i in range(4)]).lower()
             if fourcc_str in ("avc1", "h264", "x264") and suffix == ".mp4":
+                _compat_cache[cache_key] = (mtime, True)
                 return True
             if fourcc_str in ("hevc", "h265", "hev1"):
+                _compat_cache[cache_key] = (mtime, False)
                 return False
     except Exception as exc:
         logger.warning(f"OpenCV FourCC check failed for {video_path}: {exc}")
 
+    # 2. Secondary path: Probe stream info using ffmpeg
+    ffmpeg_exe = get_ffmpeg_binary()
+    if ffmpeg_exe:
+        try:
+            probe = subprocess.run(
+                [ffmpeg_exe, "-i", str(video_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            stderr_lower = probe.stderr.lower()
+
+            if "video: hevc" in stderr_lower or "video: h265" in stderr_lower or "hev1" in stderr_lower:
+                _compat_cache[cache_key] = (mtime, False)
+                return False
+
+            if suffix == ".mp4":
+                if ("video: h264" in stderr_lower or "avc1" in stderr_lower) and "yuv420p" in stderr_lower:
+                    _compat_cache[cache_key] = (mtime, True)
+                    return True
+            elif suffix == ".webm":
+                if "video: vp8" in stderr_lower or "video: vp9" in stderr_lower or "video: av1" in stderr_lower:
+                    _compat_cache[cache_key] = (mtime, True)
+                    return True
+
+            _compat_cache[cache_key] = (mtime, False)
+            return False
+        except Exception as exc:
+            logger.warning(f"ffmpeg probe error for {video_path}: {exc}")
+
+    _compat_cache[cache_key] = (mtime, False)
     return False
 
 
@@ -167,9 +184,10 @@ def transcode_to_h264(input_path: Path, output_path: Path) -> Path:
     cmd = [
         ffmpeg_exe,
         "-y",
+        "-threads", "0",
         "-i", str(input_path),
         "-c:v", "libx264",
-        "-preset", "fast",
+        "-preset", "veryfast",
         "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",

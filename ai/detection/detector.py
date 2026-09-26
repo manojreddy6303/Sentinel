@@ -82,12 +82,110 @@ class YOLODetector:
                 ) from exc
         return self._model
 
+    def _parse_single_result(
+        self,
+        result: Any,
+        frame: Any,
+        timestamp: float,
+        frame_idx: int = 0,
+        video_id: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Parse YOLO result for a single frame into standardized canonical detection dicts."""
+        detections: List[Dict[str, Any]] = []
+        if result is None or getattr(result, "boxes", None) is None:
+            return detections
+
+        model = self._load_model()
+        frame_h, frame_w = frame.shape[:2] if hasattr(frame, "shape") and len(frame.shape) >= 2 else (None, None)
+
+        for box in result.boxes:
+            # Extract raw values
+            try:
+                confidence = float(box.conf[0])
+            except Exception:
+                continue
+
+            try:
+                class_id = int(box.cls[0])
+                class_name = model.names.get(class_id, f"class_{class_id}")
+            except Exception:
+                continue
+
+            # Class-specific or global confidence threshold
+            req_threshold = self.class_confidence_thresholds.get(class_name, self.confidence_threshold)
+            if confidence < req_threshold:
+                continue
+
+            # Optionally filter to surveillance-relevant classes
+            if self.surveillance_classes and class_name not in self.surveillance_classes:
+                continue
+
+            try:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+            except Exception:
+                continue
+
+            # Reject NaN or infinite coordinates
+            if not is_finite_number(x1) or not is_finite_number(y1) or not is_finite_number(x2) or not is_finite_number(y2):
+                continue
+
+            # Reject technically invalid (zero/negative) dimensions
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            # Frame boundary validation
+            if frame_w is not None and frame_h is not None and frame_w > 0 and frame_h > 0:
+                if x2 <= 0 or y2 <= 0 or x1 >= frame_w or y1 >= frame_h:
+                    continue
+                x1 = max(0.0, min(float(frame_w), x1))
+                y1 = max(0.0, min(float(frame_h), y1))
+                x2 = max(0.0, min(float(frame_w), x2))
+                y2 = max(0.0, min(float(frame_h), y2))
+                if (x2 - x1) <= 0 or (y2 - y1) <= 0:
+                    continue
+
+            bbox = BoundingBox(
+                x1=round(x1, 2),
+                y1=round(y1, 2),
+                x2=round(x2, 2),
+                y2=round(y2, 2),
+            )
+            is_edge = bbox.is_edge_clipped(frame_w, frame_h, margin=4.0)
+            boundaries = bbox.edge_clip_boundaries(frame_w, frame_h, margin=4.0)
+
+            canonical = CanonicalDetection(
+                video_id=video_id,
+                frame_index=frame_idx,
+                timestamp_seconds=round(ensure_finite(timestamp, 0.0), 4),
+                class_name=class_name,
+                class_id=class_id,
+                confidence=round(clamp_finite(confidence, 0.0, 1.0, default=0.0), 4),
+                bounding_box=bbox,
+                detector_name="yolo_detector",
+                detector_version="v8n",
+                validation_status=DetectionValidationStatus.RAW,
+                observation_source="yolo_detector",
+                model_or_heuristic="trained_model",
+                image_width=frame_w,
+                image_height=frame_h,
+                is_edge_clipped=is_edge,
+                edge_clip_boundaries=boundaries,
+            )
+            detections.append(canonical.to_dict())
+
+        # Intra-frame duplicate suppression (IoU >= 0.70 for identical class)
+        if len(detections) > 1:
+            detections = self._suppress_duplicate_detections(detections, iou_threshold=0.70)
+
+        return detections
+
     def detect(
         self,
         frame: Any,
         timestamp: float,
         frame_idx: int = 0,
         video_id: str = "",
+        imgsz: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run YOLO object detection on a single video frame.
@@ -97,109 +195,65 @@ class YOLODetector:
             timestamp: Timestamp in seconds of this frame in the source video.
             frame_idx: Optional index of the processed frame.
             video_id: Optional ID of the parent video.
+            imgsz: Optional inference image size dimension.
 
         Returns:
             List of standardized canonical detection dicts.
         """
         model = self._load_model()
-        detections = []
-
         try:
-            # Run inference; verbose=False suppresses per-frame console output
-            results = model(frame, verbose=False)
+            if imgsz:
+                results = model(frame, imgsz=imgsz, verbose=False)
+            else:
+                results = model(frame, verbose=False)
         except Exception as exc:
             logger.error(f"YOLO inference failed at timestamp {timestamp:.2f}s: {exc}")
             raise RuntimeError(f"YOLO inference error: {exc}") from exc
 
-        if not results:
-            return detections
+        result = results[0] if results else None
+        return self._parse_single_result(result, frame, timestamp, frame_idx, video_id)
 
-        frame_h, frame_w = frame.shape[:2] if hasattr(frame, "shape") and len(frame.shape) >= 2 else (None, None)
+    def detect_batch(
+        self,
+        frames: List[Any],
+        timestamps: List[float],
+        frame_indices: Optional[List[int]] = None,
+        video_id: str = "",
+        imgsz: Optional[int] = None,
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Run YOLO object detection on a batch of video frames for high throughput.
 
-        for result in results:
-            if result.boxes is None:
-                continue
+        Args:
+            frames: List of BGR numpy arrays.
+            timestamps: List of timestamp floats in seconds corresponding to each frame.
+            frame_indices: Optional list of frame index numbers.
+            video_id: Optional ID of the parent video.
+            imgsz: Optional inference image size dimension.
 
-            for box in result.boxes:
-                # Extract raw values
-                try:
-                    confidence = float(box.conf[0])
-                except Exception:
-                    continue
+        Returns:
+            List of detection lists, one per input frame.
+        """
+        if not frames:
+            return []
+        model = self._load_model()
+        try:
+            if imgsz:
+                results = model(frames, imgsz=imgsz, verbose=False)
+            else:
+                results = model(frames, verbose=False)
+        except Exception as exc:
+            logger.error(f"YOLO batch inference failed: {exc}")
+            raise RuntimeError(f"YOLO batch inference error: {exc}") from exc
 
-                try:
-                    class_id = int(box.cls[0])
-                    class_name = model.names.get(class_id, f"class_{class_id}")
-                except Exception:
-                    continue
-
-                # Class-specific or global confidence threshold
-                req_threshold = self.class_confidence_thresholds.get(class_name, self.confidence_threshold)
-                if confidence < req_threshold:
-                    continue
-
-                # Optionally filter to surveillance-relevant classes
-                if self.surveillance_classes and class_name not in self.surveillance_classes:
-                    continue
-
-                try:
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                except Exception:
-                    continue
-
-                # Reject NaN or infinite coordinates
-                if not is_finite_number(x1) or not is_finite_number(y1) or not is_finite_number(x2) or not is_finite_number(y2):
-                    continue
-
-                # Reject technically invalid (zero/negative) dimensions
-                if x2 <= x1 or y2 <= y1:
-                    continue
-
-                # Frame boundary validation
-                if frame_w is not None and frame_h is not None and frame_w > 0 and frame_h > 0:
-                    if x2 <= 0 or y2 <= 0 or x1 >= frame_w or y1 >= frame_h:
-                        continue
-                    x1 = max(0.0, min(float(frame_w), x1))
-                    y1 = max(0.0, min(float(frame_h), y1))
-                    x2 = max(0.0, min(float(frame_w), x2))
-                    y2 = max(0.0, min(float(frame_h), y2))
-                    if (x2 - x1) <= 0 or (y2 - y1) <= 0:
-                        continue
-
-                bbox = BoundingBox(
-                    x1=round(x1, 2),
-                    y1=round(y1, 2),
-                    x2=round(x2, 2),
-                    y2=round(y2, 2),
-                )
-                is_edge = bbox.is_edge_clipped(frame_w, frame_h, margin=4.0)
-                boundaries = bbox.edge_clip_boundaries(frame_w, frame_h, margin=4.0)
-
-                canonical = CanonicalDetection(
-                    video_id=video_id,
-                    frame_index=frame_idx,
-                    timestamp_seconds=round(ensure_finite(timestamp, 0.0), 4),
-                    class_name=class_name,
-                    class_id=class_id,
-                    confidence=round(clamp_finite(confidence, 0.0, 1.0, default=0.0), 4),
-                    bounding_box=bbox,
-                    detector_name="yolo_detector",
-                    detector_version="v8n",
-                    validation_status=DetectionValidationStatus.RAW,
-                    observation_source="yolo_detector",
-                    model_or_heuristic="trained_model",
-                    image_width=frame_w,
-                    image_height=frame_h,
-                    is_edge_clipped=is_edge,
-                    edge_clip_boundaries=boundaries,
-                )
-                detections.append(canonical.to_dict())
-
-        # Intra-frame duplicate suppression (IoU >= 0.70 for identical class)
-        if len(detections) > 1:
-            detections = self._suppress_duplicate_detections(detections, iou_threshold=0.70)
-
-        return detections
+        indices = frame_indices or [0] * len(frames)
+        batch_detections: List[List[Dict[str, Any]]] = []
+        for idx, (frame, timestamp, f_idx) in enumerate(zip(frames, timestamps, indices)):
+            res = results[idx] if idx < len(results) else None
+            batch_detections.append(
+                self._parse_single_result(res, frame, timestamp, f_idx, video_id)
+            )
+        return batch_detections
 
     @staticmethod
     def _compute_iou(b1: Dict[str, float], b2: Dict[str, float]) -> float:

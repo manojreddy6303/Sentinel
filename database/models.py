@@ -2,6 +2,7 @@
 SQLAlchemy Models for Sentinel Database Schema
 """
 import uuid
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from sqlalchemy import Column, String, Float, Integer, DateTime, ForeignKey, Index, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
@@ -658,4 +659,57 @@ Index("idx_case_status_priority", CaseModel.status, CaseModel.priority)
 Index("idx_case_bookmarks_time", CaseBookmarkModel.case_id, CaseBookmarkModel.timestamp_seconds)
 Index("idx_case_annotations_time", CaseAnnotationModel.case_id, CaseAnnotationModel.timestamp_seconds)
 Index("idx_case_activities_time", CaseActivityModel.case_id, CaseActivityModel.created_at)
+
+
+# ---------------------------------------------------------------------------
+# Sentinel Cybersecurity Extension Model
+# ---------------------------------------------------------------------------
+
+class CyberSecurityEventModel(Base):
+    """
+    Sentinel Cybersecurity Extension:
+    Digital / IT security telemetry events associated with Sentinel security assets (e.g. CCTV Camera Sources).
+    Captures authentication anomalies, unauthorized access, configuration changes, connection drops,
+    stream/digital integrity issues, and security policy violations.
+
+    PROVENANCE:
+    Every record explicitly declares its provenance (e.g. REPLAYED_TELEMETRY, LIVE_TELEMETRY, MANUAL_ANALYST_EVENT).
+    Demo/prototype data is never misrepresented as live telemetry.
+    """
+    __tablename__ = "cyber_security_events"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    event_type = Column(String(100), nullable=False, index=True)
+    # AUTHENTICATION_ANOMALY, UNAUTHORIZED_ACCESS_ATTEMPT, CONFIGURATION_CHANGE,
+    # CONNECTION_ANOMALY, STREAM_INTEGRITY_ANOMALY, DIGITAL_INTEGRITY_ANOMALY, SECURITY_POLICY_VIOLATION
+    severity = Column(String(20), nullable=False, default="MEDIUM", index=True)  # LOW, MEDIUM, HIGH, CRITICAL
+    timestamp = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    timestamp_seconds = Column(Float, nullable=True, index=True)  # Relative video seconds if aligned with footage
+    asset_id = Column(String(36), ForeignKey("camera_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    asset_label = Column(String(100), nullable=False, index=True)  # e.g. "CAM-NORTH-01"
+    status = Column(String(50), nullable=False, default="NEW", index=True)  # NEW, INVESTIGATING, CONFIRMED, DISMISSED, RESOLVED
+    description = Column(Text, nullable=False)
+    source_ip = Column(String(64), nullable=True)
+    destination_port = Column(Integer, nullable=True)
+    structured_metadata = Column(JSON, nullable=True)  # Detailed telemetry attributes
+    provenance = Column(String(50), nullable=False, default="REPLAYED_TELEMETRY", index=True)
+    video_id = Column(String(36), ForeignKey("videos.id", ondelete="SET NULL"), nullable=True, index=True)
+    incident_id = Column(String(36), ForeignKey("correlated_incidents.id", ondelete="SET NULL"), nullable=True, index=True)
+    evidence_id = Column(String(36), ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    asset = relationship("CameraSourceModel", foreign_keys=[asset_id])
+    video = relationship("VideoModel", foreign_keys=[video_id])
+    incident = relationship("CorrelatedIncidentModel", foreign_keys=[incident_id])
+    evidence = relationship("EvidenceModel", foreign_keys=[evidence_id])
+
+    @property
+    def video_offset_seconds(self) -> Optional[float]:
+        return self.timestamp_seconds
+
+
+Index("idx_cyber_asset_time", CyberSecurityEventModel.asset_label, CyberSecurityEventModel.timestamp)
+Index("idx_cyber_severity_status", CyberSecurityEventModel.severity, CyberSecurityEventModel.status)
+Index("idx_cyber_event_type", CyberSecurityEventModel.event_type)
+
 

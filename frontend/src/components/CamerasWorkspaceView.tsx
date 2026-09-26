@@ -38,6 +38,7 @@ export default function CamerasWorkspaceView({
   const [fovHint, setFovHint] = useState("");
   const [isRegistering, setIsRegistering] = useState(false);
   const [registerError, setRegisterError] = useState<string | null>(null);
+  const [totalCameras, setTotalCameras] = useState<number>(0);
 
 
 
@@ -50,9 +51,11 @@ export default function CamerasWorkspaceView({
         listVideos({ limit: 100 }),
       ]);
       setCameras(camsRes.cameras || []);
+      setTotalCameras(camsRes.total ?? camsRes.cameras?.length ?? 0);
       setVideos(vidsRes.videos || []);
       if (!selectedVideoId && vidsRes.videos?.length > 0) {
-        setSelectedVideoId(vidsRes.videos[0].id);
+        const canonical = vidsRes.videos.find((v: any) => v.id === "0d4d92f9-19f8-42e3-925f-1931cb557705");
+        setSelectedVideoId(canonical ? canonical.id : vidsRes.videos[0].id);
       }
     } catch (err: any) {
       setError(err.message || "Failed to load camera sources.");
@@ -106,7 +109,7 @@ export default function CamerasWorkspaceView({
               Camera &amp; Video Sources
             </h1>
             <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-              {cameras.length} Cameras Active
+              {totalCameras} Cameras Active
             </span>
           </div>
           <p className="text-sm text-zinc-400 mt-1.5">

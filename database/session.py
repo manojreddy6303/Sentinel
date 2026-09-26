@@ -113,6 +113,7 @@ def init_db():
             SurveillanceSessionModel, CameraSourceModel, CrossCameraAssociationModel,
             CaseModel, CaseVideoModel, CaseCameraModel, CaseIncidentModel, CaseEvidenceModel,
             CaseBookmarkModel, CaseNoteModel, CaseAnnotationModel, CaseActivityModel,
+            CyberSecurityEventModel,
         )  # noqa
         Base.metadata.create_all(bind=engine)
         if DB_URL.startswith("sqlite"):

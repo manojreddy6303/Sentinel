@@ -140,6 +140,31 @@ class MediaMetadataExtractor:
         else:
             duration_uncertain = True
 
+        # Fallback duration probe via ffmpeg if container header lacked frame count
+        if (frame_count <= 0 or duration_seconds <= 0.0) and is_decodable:
+            try:
+                import subprocess, re
+                from backend.app.services.playback_service import get_ffmpeg_binary
+                ff_bin = get_ffmpeg_binary()
+                if ff_bin:
+                    probe = subprocess.run(
+                        [ff_bin, "-i", str(path)],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    dur_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", probe.stderr)
+                    if dur_match:
+                        hrs, mns, scs = float(dur_match.group(1)), float(dur_match.group(2)), float(dur_match.group(3))
+                        probed_dur = hrs * 3600.0 + mns * 60.0 + scs
+                        if probed_dur > 0:
+                            duration_seconds = round(probed_dur, 4)
+                            duration_uncertain = False
+                            if frame_count <= 0 and fps > 0:
+                                frame_count = max(1, int(round(duration_seconds * fps)))
+            except Exception as ff_err:
+                logger.debug(f"Media duration probe fallback error for {video_path}: {ff_err}")
+
         # Determine orientation
         if width > height:
             orientation = "landscape"

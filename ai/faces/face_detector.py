@@ -21,6 +21,25 @@ from ai.schemas import BoundingBox, FaceDetection
 logger = logging.getLogger(__name__)
 
 
+_cached_cascade = None
+_cascade_initialized = False
+
+
+def _get_shared_cascade():
+    global _cached_cascade, _cascade_initialized
+    if not _cascade_initialized:
+        _cascade_initialized = True
+        if hasattr(cv2, "CascadeClassifier"):
+            try:
+                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+                casc = cv2.CascadeClassifier(cascade_path)
+                if not casc.empty():
+                    _cached_cascade = casc
+            except Exception:
+                _cached_cascade = None
+    return _cached_cascade
+
+
 class FaceDetector:
     """
     Lightweight visual face detector for surveillance video.
@@ -30,17 +49,7 @@ class FaceDetector:
     def __init__(self, min_skin_ratio: float = 0.10, min_size: int = 16):
         self.min_skin_ratio = min_skin_ratio
         self.min_size = min_size
-
-        # Optional cascade if available in OpenCV build
-        self.cascade = None
-        if hasattr(cv2, "CascadeClassifier"):
-            try:
-                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-                self.cascade = cv2.CascadeClassifier(cascade_path)
-                if self.cascade.empty():
-                    self.cascade = None
-            except Exception:
-                self.cascade = None
+        self.cascade = _get_shared_cascade()
 
     def detect_in_person_crop(
         self,

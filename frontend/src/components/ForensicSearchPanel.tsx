@@ -281,76 +281,77 @@ export function ForensicSearchPanel({
 
   return (
     <div className="space-y-6">
-      {/* Header Banner */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-zinc-950 border border-zinc-800 p-5 rounded-xl">
+      {/* Header and Scope Banner */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#171A20] border border-[#2A3038] p-5 rounded-xl">
         <div>
-          <h3 className="text-base font-bold text-zinc-100 flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
-            FORENSIC SEARCH &amp; INVESTIGATION WORKBENCH
-            <span className="text-[10px] font-mono uppercase bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 px-2 py-0.5 rounded">
-              AI Query Engine
+          <div className="flex items-center gap-3 flex-wrap">
+            <h3 className="text-xl md:text-2xl font-bold text-[#F5F7FA]">
+              Search this investigation
+            </h3>
+            <span className="text-xs md:text-sm font-mono text-[#19B89A] bg-[#19B89A]/15 border border-[#19B89A]/30 px-3 py-1 rounded-full">
+              Current investigation: {videoId}
             </span>
-          </h3>
-          <p className="text-xs text-zinc-400 mt-1">
-            Natural-language queries, structured multi-signal filtering, unified forensic timeline, track lifecycle reconstruction, and evidence bundling.
+          </div>
+          <p className="text-sm text-[#A7AFBA] mt-1.5">
+            Forensic query grounded in validated video detections, event storylines, and physical evidence.
           </p>
         </div>
 
         {/* Sub-Navigation Tabs */}
-        <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-lg border border-zinc-800 text-xs font-mono">
+        <div className="flex items-center gap-1.5 bg-[#1D2128] p-1.5 rounded-lg border border-[#2A3038] text-sm">
           <button
             onClick={() => setActiveSubTab("search")}
-            className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
+            className={`px-3.5 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
               activeSubTab === "search"
-                ? "bg-cyan-600 text-white"
-                : "text-zinc-400 hover:text-zinc-200"
+                ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                : "text-[#A7AFBA] hover:text-[#F5F7FA]"
             }`}
           >
-            <span>🔍 Query Search</span>
+            Query Search
           </button>
 
           <button
             onClick={() => setActiveSubTab("structured")}
-            className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
+            className={`px-3.5 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
               activeSubTab === "structured"
-                ? "bg-indigo-600 text-white"
-                : "text-zinc-400 hover:text-zinc-200"
+                ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                : "text-[#A7AFBA] hover:text-[#F5F7FA]"
             }`}
           >
-            <span>⚙️ Filters</span>
+            Filters ▾
           </button>
 
           <button
             onClick={() => setActiveSubTab("timeline")}
-            className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
+            className={`px-3.5 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
               activeSubTab === "timeline"
-                ? "bg-emerald-600 text-white"
-                : "text-zinc-400 hover:text-zinc-200"
+                ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                : "text-[#A7AFBA] hover:text-[#F5F7FA]"
             }`}
           >
-            <span>⏱️ Unified Timeline</span>
+            Unified Timeline
           </button>
 
           <button
             onClick={() => setActiveSubTab("track")}
-            className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
+            className={`px-3.5 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
               activeSubTab === "track"
-                ? "bg-purple-600 text-white"
-                : "text-zinc-400 hover:text-zinc-200"
+                ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                : "text-[#A7AFBA] hover:text-[#F5F7FA]"
             }`}
           >
-            <span>🎯 Track Deep Dive</span>
+            Track Deep Dive
           </button>
 
           <button
             onClick={() => setActiveSubTab("bundles")}
-            className={`px-3 py-1.5 rounded font-semibold transition-colors flex items-center gap-1.5 ${
+            className={`px-3.5 py-1.5 rounded-lg font-medium transition-colors cursor-pointer ${
               activeSubTab === "bundles"
-                ? "bg-amber-600 text-white"
-                : "text-zinc-400 hover:text-zinc-200"
+                ? "bg-[#19B89A] text-[#0F1115] font-semibold"
+                : "text-[#A7AFBA] hover:text-[#F5F7FA]"
             }`}
           >
-            <span>📦 Bundles</span>
+            Bundles
           </button>
         </div>
       </div>
@@ -361,35 +362,35 @@ export function ForensicSearchPanel({
       {activeSubTab === "search" && (
         <div className="space-y-4">
           {/* Query Bar */}
-          <div className="bg-zinc-900 border border-zinc-800 p-4 rounded-xl space-y-3">
-            <div className="flex gap-2">
+          <div className="bg-[#171A20] border border-[#2A3038] p-6 rounded-xl space-y-4">
+            <div className="flex flex-col sm:flex-row gap-3">
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                placeholder="Ask Sentinel (e.g. 'Show people entering the gate between 0s and 30s' or 'Find confirmed incidents with evidence')..."
-                className="flex-1 bg-zinc-950 border border-zinc-700 text-zinc-100 text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:border-cyan-500 font-mono"
+                placeholder="What happened near the entrance? (e.g. 'Show vehicle activity around the gate')..."
+                className="flex-1 bg-[#1D2128] border border-[#2A3038] text-[#F5F7FA] text-base rounded-lg px-4 py-3 placeholder-[#737C87] focus:outline-none focus:border-[#19B89A]"
               />
               <button
                 onClick={() => handleSearch()}
                 disabled={isSearching || !searchQuery.trim()}
-                className="bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold px-5 py-2.5 rounded-lg transition-colors font-mono flex items-center gap-2"
+                className="bg-[#19B89A] hover:bg-[#16A489] disabled:opacity-50 text-[#0F1115] text-sm font-bold px-6 py-3 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm shrink-0"
               >
                 {isSearching ? (
                   <>
-                    <span className="h-2 w-2 rounded-full bg-white animate-ping" />
-                    Searching...
+                    <span className="h-2 w-2 rounded-full bg-[#0F1115] animate-ping" />
+                    <span>Searching...</span>
                   </>
                 ) : (
-                  <>🔍 Run Investigation</>
+                  <span>Search</span>
                 )}
               </button>
             </div>
 
             {/* Quick Prompts */}
             <div className="flex flex-wrap items-center gap-2 pt-1">
-              <span className="text-[11px] font-mono text-zinc-500">Quick queries:</span>
+              <span className="text-xs uppercase tracking-wider font-semibold text-[#737C87]">Suggestions:</span>
               {QUICK_QUERIES.map((q, idx) => (
                 <button
                   key={idx}
@@ -397,7 +398,7 @@ export function ForensicSearchPanel({
                     setSearchQuery(q);
                     handleSearch(q);
                   }}
-                  className="text-[11px] font-mono bg-zinc-800/80 hover:bg-zinc-700 text-cyan-300 px-2.5 py-1 rounded border border-zinc-700 transition-colors"
+                  className="text-xs md:text-sm bg-[#1D2128] hover:bg-[#2A3038] text-[#A7AFBA] hover:text-[#F5F7FA] px-3 py-1.5 rounded-lg border border-[#2A3038] transition-colors cursor-pointer"
                 >
                   {q}
                 </button>
@@ -406,8 +407,8 @@ export function ForensicSearchPanel({
           </div>
 
           {searchError && (
-            <div className="p-3 bg-red-950/40 border border-red-500/40 text-red-300 rounded-lg text-xs font-mono">
-              Investigation Error: {searchError}
+            <div className="p-3 bg-rose-500/10 border border-rose-500/30 text-rose-300 rounded-lg text-xs">
+              Search error: {searchError}
             </div>
           )}
 
@@ -415,35 +416,38 @@ export function ForensicSearchPanel({
           {searchResult && (
             <div className="space-y-4">
               {/* Grounded Synthesis Card */}
-              <div className="bg-zinc-950 border border-cyan-500/40 rounded-xl p-5 space-y-3">
+              <div className="bg-[#171A20] border border-[#2A3038] rounded-xl p-5 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono font-bold uppercase text-cyan-400 bg-cyan-950/80 border border-cyan-700/50 px-2 py-0.5 rounded">
+                    <span className="text-xs font-medium text-[#19B89A] bg-[#19B89A]/15 border border-[#19B89A]/30 px-2 py-0.5 rounded">
                       Grounded Answer
                     </span>
-                    <span className="text-xs text-zinc-400 font-mono">
-                      Matches: {searchResult.total_results} total items
+                    <span className="text-xs text-[#737C87]">
+                      {searchResult.total_results} matching items
                     </span>
                   </div>
 
                   {searchResult.diagnostics && (
-                    <div className="flex items-center gap-3 text-[11px] font-mono text-zinc-500">
-                      <span>⚡ {searchResult.diagnostics.total_time_ms} ms</span>
+                    <div className="flex items-center gap-3 text-xs text-[#737C87]">
+                      <span>{searchResult.diagnostics.total_time_ms} ms</span>
                       <span>Incidents: {searchResult.diagnostics.incidents_found}</span>
-                      <span>Events: {searchResult.diagnostics.events_found}</span>
                       <span>Tracks: {searchResult.diagnostics.tracks_found}</span>
                       <span>Evidence: {searchResult.diagnostics.evidence_found}</span>
                     </div>
                   )}
                 </div>
 
-                <p className="text-sm text-zinc-200 leading-relaxed font-sans">
-                  {searchResult.grounded_answer || "No synthesis text available."}
+                <p className="text-sm text-[#F5F7FA] leading-relaxed">
+                  {searchResult.grounded_answer && !searchResult.grounded_answer.toLowerCase().includes("no matching security events found")
+                    ? searchResult.grounded_answer
+                    : searchResult.total_results === 0
+                    ? `Search executed successfully. No validated ${searchQuery.toLowerCase().includes("vehicle") || searchQuery.toLowerCase().includes("car") ? "vehicle" : searchQuery.toLowerCase().includes("person") ? "person" : "matching"} observations were found in this investigation.`
+                    : searchResult.grounded_answer || "Search executed successfully. No validated matching observations were found in this investigation."}
                 </p>
 
                 {searchResult.interpretation && (
-                  <div className="text-xs text-zinc-400 font-mono bg-zinc-900/60 p-2.5 rounded border border-zinc-800">
-                    <span className="text-zinc-500">Query Interpretation:</span> {searchResult.interpretation}
+                  <div className="text-xs text-[#A7AFBA] bg-[#1D2128] p-2.5 rounded-lg border border-[#2A3038]">
+                    <span className="text-[#737C87]">Interpretation:</span> {searchResult.interpretation}
                   </div>
                 )}
               </div>

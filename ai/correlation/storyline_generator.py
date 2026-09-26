@@ -146,9 +146,10 @@ class IncidentStorylineGenerator:
             return narrative
 
         # General Grounded Fallback
-        signals_summary = f"Supported by {len(supporting_signals)} verified physical signal(s)." if supporting_signals else ""
+        signals_summary = f"Supported by {len(supporting_signals)} validated physical signal(s)." if supporting_signals else ""
+        action_verb = "detected" if ("REVIEW" in str(validation_decision).upper()) else "validated"
         return (
-            f"At {start_time:.1f}s, automated surveillance intelligence registered a verified {subcategory.replace('_', ' ')} "
+            f"At {start_time:.1f}s, automated surveillance intelligence registered a {action_verb} {subcategory.replace('_', ' ')} "
             f"pattern involving {tracks_str} ({classes_str}) lasting {duration:.1f} seconds. {signals_summary} "
             f"Confidence: {confidence*100:.0f}% (status: {validation_decision}). {decision_clause}"
         )

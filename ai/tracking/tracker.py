@@ -105,14 +105,12 @@ class ObjectTracker:
 
         # Separate currently active tracks
         active_tracks = [t for t in self._tracks.values() if t.active]
-        unmatched_dets = list(range(len(current_dets)))
+        unmatched_dets = set(range(len(current_dets)))
         matched_tracks = set()
 
-        # Match tracks of the same class by IoU and distance
+        # Build candidate associations scored by IoU and spatial proximity
+        candidate_matches: List[Tuple[float, TrackedObject, int]] = []
         for track in active_tracks:
-            best_det_idx = -1
-            best_score = -1.0
-
             for idx in unmatched_dets:
                 d_cls, d_conf, d_bbox, _ = current_dets[idx]
                 if d_cls != track.object_class:
@@ -138,30 +136,34 @@ class ObjectTracker:
                 else:
                     score = 0.0
 
-                if score > best_score and score > 0.0:
-                    best_score = score
-                    best_det_idx = idx
+                if score > 0.0:
+                    candidate_matches.append((score, track, idx))
 
-            if best_det_idx >= 0:
-                # Update existing track
-                d_cls, d_conf, d_bbox, raw_det = current_dets[best_det_idx]
-                track.last_seen = timestamp
-                track.confidence = max(track.confidence, d_conf)
-                track.current_bbox = d_bbox
-                cx, cy = d_bbox.centroid
-                track.trajectory.append((timestamp, round(cx, 2), round(cy, 2)))
-                track.history_bboxes.append({"timestamp": timestamp, "bbox": d_bbox.to_dict()})
-                if track.is_validated or len(track.history_bboxes) >= 2:
-                    track.state = TrackLifecycleState.CONFIRMED
-                else:
-                    track.state = TrackLifecycleState.TENTATIVE
-                if isinstance(raw_det, dict):
-                    raw_det["track_id"] = track.track_id
-                matched_tracks.add(track.track_id)
-                unmatched_dets.remove(best_det_idx)
+        # Sort candidate matches descending for optimal global association
+        candidate_matches.sort(key=lambda item: item[0], reverse=True)
+        for score, track, idx in candidate_matches:
+            if track.track_id in matched_tracks or idx not in unmatched_dets:
+                continue
+
+            # Update existing track
+            d_cls, d_conf, d_bbox, raw_det = current_dets[idx]
+            track.last_seen = timestamp
+            track.confidence = max(track.confidence, d_conf)
+            track.current_bbox = d_bbox
+            cx, cy = d_bbox.centroid
+            track.trajectory.append((timestamp, round(cx, 2), round(cy, 2)))
+            track.history_bboxes.append({"timestamp": timestamp, "bbox": d_bbox.to_dict()})
+            if track.is_validated or len(track.history_bboxes) >= 2:
+                track.state = TrackLifecycleState.CONFIRMED
+            else:
+                track.state = TrackLifecycleState.TENTATIVE
+            if isinstance(raw_det, dict):
+                raw_det["track_id"] = track.track_id
+            matched_tracks.add(track.track_id)
+            unmatched_dets.remove(idx)
 
         # Create new tracks for unmatched detections
-        for idx in unmatched_dets:
+        for idx in sorted(unmatched_dets):
             d_cls, d_conf, d_bbox, raw_det = current_dets[idx]
             track_id = f"TRACK-{self._next_id:03d}"
             self._next_id += 1

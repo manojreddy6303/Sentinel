@@ -320,11 +320,9 @@ export async function getVideoInfo(videoId: string): Promise<VideoMetadata> {
  * Trigger OpenCV + YOLO processing pipeline for an uploaded video.
  * Synchronous on the backend for MVP; runs the full pipeline and returns a summary.
  */
-export async function processVideo(videoId: string): Promise<ProcessVideoResponse> {
-  const response = await fetch(
-    `${API_BASE_URL}/api/videos/${encodeURIComponent(videoId)}/process`,
-    { method: "POST" }
-  );
+export async function processVideo(videoId: string, force: boolean = false): Promise<ProcessVideoResponse> {
+  const url = `${API_BASE_URL}/api/videos/${encodeURIComponent(videoId)}/process${force ? "?force=true" : ""}`;
+  const response = await fetch(url, { method: "POST" });
   if (!response.ok) {
     let errorMsg = `Processing failed (Status ${response.status})`;
     try {
@@ -769,6 +767,8 @@ export interface SecurityEventItem {
   object_class?: string | null;
   severity: "LOW" | "NORMAL" | "HIGH";
   confidence: number;
+  pattern_evidence_strength?: number | null;
+  assessment_score?: number | null;
   zone_name?: string | null;
   description: string;
   observable_signals?: string[] | Record<string, any>;
@@ -2564,6 +2564,7 @@ export interface AnalyticsSummary {
   review_required_count: number;
   review_ceiling: number;
   specialized_counts: Record<string, number>;
+  specialized_validated?: Record<string, number>;
   detector_health: Array<{ id: string; name: string; status: string; type: string }>;
 }
 
@@ -2576,6 +2577,212 @@ export async function listAllReports(): Promise<{ status: string; count: number;
   const res = await fetch(`${API_BASE_URL}/api/reports`);
   return handleApiResponse(res, "List all incident reports");
 }
+
+// ===========================================================================
+// Cybersecurity Extension API & Types
+// ===========================================================================
+
+export interface CyberEventItem {
+  id: string;
+  event_id?: string;
+  event_type: string;
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  timestamp: string;
+  timestamp_seconds?: number | null;
+  asset_id?: string | null;
+  asset_label: string;
+  status: "NEW" | "INVESTIGATING" | "CONFIRMED" | "DISMISSED" | "RESOLVED";
+  description: string;
+  source_ip?: string | null;
+  destination_port?: number | null;
+  structured_metadata?: Record<string, any>;
+  provenance: string;
+  video_id?: string | null;
+  video_filename?: string | null;
+  incident_id?: string | null;
+  evidence_id?: string | null;
+  created_at?: string | null;
+}
+
+export interface SecurityAssetItem {
+  asset_id: string;
+  asset_label: string;
+  position_hint: string;
+  field_of_view_hint: string;
+  status: string;
+  video_id?: string | null;
+  video_filename?: string | null;
+  total_cyber_events: number;
+  high_severity_cyber_events: number;
+  physical_incident_count: number;
+  physical_evidence_count: number;
+  latest_cyber_event?: CyberEventItem | null;
+  has_active_threat: boolean;
+}
+
+export interface CyberPhysicalCorrelationItem {
+  correlation_id: string;
+  security_asset: string;
+  asset_id?: string | null;
+  cyber_event: {
+    id: string;
+    event_type: string;
+    severity: string;
+    timestamp?: string | null;
+    timestamp_seconds?: number | null;
+    description: string;
+    source_ip?: string | null;
+    provenance: string;
+  };
+  physical_incident: {
+    id: string;
+    category: string;
+    start_time: number;
+    end_time?: number | null;
+    assessment_score: number;
+    validation_decision: string;
+    storyline?: string | null;
+  };
+  temporal_delta_seconds?: number | null;
+  correlation_hypothesis: string;
+  confidence_score: number;
+  status: string;
+  human_verification_required: boolean;
+  supporting_evidence: Array<{
+    evidence_id: string;
+    timestamp: number;
+    evidence_type: string;
+    object_class?: string | null;
+    confidence?: number | null;
+    snapshot_url?: string | null;
+    annotated_snapshot_url?: string | null;
+    clip_url?: string | null;
+  }>;
+  correlation_narrative: string;
+}
+
+export interface CyberInvestigationResult {
+  query: string;
+  security_asset: string;
+  asset_info?: any;
+  actions_taken: Array<{
+    step: number;
+    action: string;
+    detail: string;
+    status: string;
+  }>;
+  cyber_events: CyberEventItem[];
+  correlations: CyberPhysicalCorrelationItem[];
+  supporting_evidence: Array<{
+    evidence_id: string;
+    timestamp: number;
+    type: string;
+    object_class?: string | null;
+    confidence?: number | null;
+    snapshot_url?: string | null;
+    clip_url?: string | null;
+  }>;
+  findings: string;
+  assessment_score: number;
+  status: string;
+  human_verification_required: boolean;
+  provenance: string;
+  gemini_used?: boolean;
+  limitations: string[];
+}
+
+export async function listCyberEvents(params?: {
+  asset_id?: string;
+  asset_label?: string;
+  event_type?: string;
+  severity?: string;
+  status?: string;
+  provenance?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ total: number; events: CyberEventItem[]; limit: number; offset: number }> {
+  const q = new URLSearchParams();
+  if (params?.asset_id) q.set("asset_id", params.asset_id);
+  if (params?.asset_label && params.asset_label !== "all") q.set("asset_label", params.asset_label);
+  if (params?.event_type && params.event_type !== "all") q.set("event_type", params.event_type);
+  if (params?.severity && params.severity !== "all") q.set("severity", params.severity);
+  if (params?.status && params.status !== "all") q.set("status", params.status);
+  if (params?.provenance && params.provenance !== "all") q.set("provenance", params.provenance);
+  if (params?.search) q.set("search", params.search);
+  if (params?.limit) q.set("limit", String(params.limit));
+  if (params?.offset) q.set("offset", String(params.offset));
+
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  const res = await fetch(`${API_BASE_URL}/api/cyber/events${qs}`);
+  return handleApiResponse(res, "List cybersecurity events");
+}
+
+export async function getCyberEvent(eventId: string): Promise<CyberEventItem> {
+  const res = await fetch(`${API_BASE_URL}/api/cyber/events/${encodeURIComponent(eventId)}`);
+  return handleApiResponse(res, "Get cybersecurity event");
+}
+
+export async function createCyberEvent(payload: Partial<CyberEventItem>): Promise<CyberEventItem> {
+  const res = await fetch(`${API_BASE_URL}/api/cyber/events`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleApiResponse(res, "Create cybersecurity event");
+}
+
+export async function listSecurityAssets(): Promise<{ total_assets: number; assets: SecurityAssetItem[] }> {
+  const res = await fetch(`${API_BASE_URL}/api/cyber/assets`);
+  return handleApiResponse(res, "List security assets");
+}
+
+export async function correlateCyberPhysical(payload: {
+  asset_label_or_id?: string;
+  time_window_seconds?: number;
+  video_id?: string;
+}): Promise<{
+  total_correlations: number;
+  target_asset: string;
+  correlations: CyberPhysicalCorrelationItem[];
+  review_ceiling: number;
+  safety_policy: string;
+}> {
+  const res = await fetch(`${API_BASE_URL}/api/cyber/correlate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleApiResponse(res, "Correlate cyber and physical telemetry");
+}
+
+export async function seedCyberDemoTelemetry(): Promise<{
+  status: string;
+  created_count: number;
+  updated_count: number;
+  total_demo_events: number;
+  provenance: string;
+  message: string;
+}> {
+  const res = await fetch(`${API_BASE_URL}/api/cyber/seed-demo`, {
+    method: "POST",
+  });
+  return handleApiResponse(res, "Seed cybersecurity demo telemetry");
+}
+
+export async function investigateCyber(payload: {
+  query: string;
+  asset_label?: string;
+  time_window_seconds?: number;
+}): Promise<CyberInvestigationResult> {
+  const res = await fetch(`${API_BASE_URL}/api/cyber/investigate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleApiResponse(res, "Investigate cybersecurity telemetry");
+}
+
 
 
 

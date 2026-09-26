@@ -75,11 +75,19 @@ class VehicleColorAnalyzer:
                 color_space_metrics={"error": "Crop too small for color analysis"},
             )
 
-        # Focus on vehicle body core (avoiding top roof/sky and bottom tires/asphalt)
-        cy1 = int(ch * 0.20)
-        cy2 = int(ch * 0.85)
-        cx1 = int(cw * 0.15)
-        cx2 = int(cw * 0.85)
+        # Focus on object core: upper-body torso for persons, body core for vehicles
+        if object_class == "person":
+            # For persons: focus on upper-body torso / clothing (avoiding head/hair and lower legs/floor)
+            cy1 = int(ch * 0.15)
+            cy2 = int(ch * 0.58)
+            cx1 = int(cw * 0.15)
+            cx2 = int(cw * 0.85)
+        else:
+            # Vehicle body core (avoiding top roof/sky and bottom tires/asphalt)
+            cy1 = int(ch * 0.20)
+            cy2 = int(ch * 0.85)
+            cx1 = int(cw * 0.15)
+            cx2 = int(cw * 0.85)
         body_crop = crop[cy1:cy2, cx1:cx2]
 
         if body_crop.size == 0:
@@ -145,11 +153,29 @@ class VehicleColorAnalyzer:
         counts["brown"] = int(np.count_nonzero(brown_mask))
 
         # Determine dominant color
-        best_color, best_count = max(counts.items(), key=lambda item: item[1])
-        confidence = float(best_count) / float(total_pixels)
+        if object_class == "person":
+            # For person clothing: if a chromatic color (blue, red, orange, yellow, green, brown)
+            # is distinctively present (>= 18% of torso pixels), it reflects the person's distinctive clothing
+            chromatic_families = ["blue", "red", "orange", "yellow", "green", "brown"]
+            best_chrom_color, best_chrom_count = max(
+                [(c, counts[c]) for c in chromatic_families],
+                key=lambda item: item[1],
+            )
+            chrom_ratio = float(best_chrom_count) / float(total_pixels)
+            if chrom_ratio >= 0.18:
+                best_color = best_chrom_color
+                best_count = best_chrom_count
+                confidence = chrom_ratio
+            else:
+                best_color, best_count = max(counts.items(), key=lambda item: item[1])
+                confidence = float(best_count) / float(total_pixels)
+        else:
+            best_color, best_count = max(counts.items(), key=lambda item: item[1])
+            confidence = float(best_count) / float(total_pixels)
 
         # If highest confidence is below threshold, label as unknown
-        if confidence < self.min_confidence_threshold or best_count == 0:
+        effective_min_thresh = 0.18 if object_class == "person" else self.min_confidence_threshold
+        if confidence < effective_min_thresh or best_count == 0:
             final_color = "unknown"
             final_conf = max(0.1, round(confidence, 3))
         else:

@@ -349,6 +349,10 @@ class InvestigationService:
         if obj_class:
             q = q.filter(TrackModel.object_class.ilike(obj_class))
 
+        target_color = filters.get("color")
+        if target_color:
+            q = q.filter(TrackModel.color.ilike(target_color))
+
         rows = q.order_by(TrackModel.first_seen.asc()).all()
         results = [
             {
@@ -367,10 +371,16 @@ class InvestigationService:
             for r in rows
         ]
 
-        msg = (
-            f"Found {len(results)} multi-frame tracked objects. "
-            "(Note: Track IDs represent consistent visual objects in this video only; zero personal identity attribution)."
-        )
+        if target_color and obj_class:
+            msg = (
+                f"Found {len(results)} multi-frame tracked {obj_class} objects matching visual color '{target_color}'. "
+                "(Note: Track IDs represent consistent visual objects in this video only; zero personal identity attribution)."
+            )
+        else:
+            msg = (
+                f"Found {len(results)} multi-frame tracked objects. "
+                "(Note: Track IDs represent consistent visual objects in this video only; zero personal identity attribution)."
+            )
 
         return {
             "query": query_text,

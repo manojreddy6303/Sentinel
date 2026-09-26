@@ -31,6 +31,7 @@ from ai.incidents.schemas import (
     SupportingSignal,
 )
 from ai.incidents.scene_context import SceneContextData
+from ai.incidents.scoring import IncidentScorer
 
 logger = logging.getLogger(__name__)
 
@@ -233,14 +234,46 @@ class IncidentCandidateValidator:
             or is_inherent_review_type
         )
 
+        # Preserve pattern evidence strength prior to validation capping
+        pattern_strength = getattr(candidate, "pattern_evidence_strength", None)
+        if pattern_strength is None or (pattern_strength == 0.5 and candidate.confidence != 0.5):
+            pattern_strength = calibrated_conf
+
         # Decision synthesis
         if is_rejected:
             decision = ValidationDecision.REJECTED
             calibrated_conf = min(calibrated_conf, 0.25)
         elif requires_review or contradictory_signals or calibrated_conf < 0.60 or prior_review_required:
             decision = ValidationDecision.REVIEW_REQUIRED
-            # Keep confidence labeled honestly as moderate evidence strength (capped for unverified observational patterns)
-            calibrated_conf = min(calibrated_conf, 0.65)
+            # Section 8-13: Calibrated assessment based on real physical signals rather than a generic 0.65 clamp
+            candidate_dur = getattr(candidate, "duration_seconds", 0.0)
+            if candidate_dur <= 0 and candidate.end_time and candidate.start_time:
+                candidate_dur = max(0.0, candidate.end_time - candidate.start_time)
+
+            sig_families = set()
+            for s in (candidate.supporting_signals or []):
+                sig_type = getattr(s, "signal_type", "")
+                sig_families.add(IncidentScorer._categorize_signal_family(sig_type))
+
+            sig_factor = min(0.06, len(sig_families) * 0.02)
+            dur_factor = min(0.06, (candidate_dur / 10.0) * 0.02)
+
+            if candidate.event_type in ("POTENTIAL_THEFT", "theft_and_takeaway"):
+                # Robust Potential Theft: signals + dwell -> 0.65; weaker patterns scale lower (0.55-0.62)
+                theft_sig = min(0.06, len(sig_families) * 0.03)
+                theft_dur = min(0.06, (candidate_dur / 10.0) * 0.03)
+                calibrated_conf = round(min(0.65, 0.58 + theft_sig + theft_dur), 4)
+            elif "PROLONGED" in candidate.event_type:
+                calibrated_conf = round(min(0.65, max(0.50, 0.54 + dur_factor * 1.5 + sig_factor)), 4)
+            elif "CROWD" in candidate.event_type or "DENSITY" in candidate.event_type:
+                tracks_count = len(getattr(candidate, "track_ids", []) or [])
+                track_vol = min(0.04, tracks_count * 0.01)
+                calibrated_conf = round(min(0.65, max(0.52, 0.55 + track_vol + sig_factor)), 4)
+            elif "FORCED" in candidate.event_type:
+                calibrated_conf = round(min(0.62, max(0.48, 0.52 + sig_factor + dur_factor)), 4)
+            else:
+                calibrated_conf = round(min(0.65, max(0.45, calibrated_conf * 0.70)), 4)
+
             if not reasons:
                 reasons.append("Observational pattern requires human verification (visual kinematics alone cannot establish intent)")
         else:
@@ -250,6 +283,43 @@ class IncidentCandidateValidator:
         candidate.validation_decision = decision.value
         candidate.validation_reasons = reasons
         candidate.confidence = round(calibrated_conf, 4)
+        candidate.assessment_score = round(calibrated_conf, 4)
+        candidate.pattern_evidence_strength = round(max(0.1, float(pattern_strength)), 4)
+
+        # Synchronize verification note inside narrative explanation so narrative scores match canonical score chips
+        if candidate.explanation and "Pattern Evidence Strength:" in candidate.explanation:
+            import re
+            final_pct = int(round(calibrated_conf * 100))
+            p_pct = int(round(candidate.pattern_evidence_strength * 100))
+            # Fix Section 15: Pattern Tier MUST map from pattern_evidence_strength percentage (p_pct), NOT final_pct
+            if p_pct >= 80:
+                pattern_tier = "High Evidence Strength"
+            elif p_pct >= 60:
+                pattern_tier = "Moderate Evidence Strength"
+            else:
+                pattern_tier = "Initial Observation"
+
+            note_action = "Human verification required" if decision == ValidationDecision.REVIEW_REQUIRED else "Sensor-grounded pattern"
+            new_note = (
+                f"Pattern Evidence Strength: {p_pct}% ({pattern_tier}) • "
+                f"Final Assessment: {final_pct}% ({decision.value}) — {note_action}"
+            )
+            candidate.explanation = re.sub(
+                r"Pattern Evidence Strength:.*?(?=\):|\)$|:\s*[A-Z])",
+                new_note,
+                candidate.explanation,
+                count=1,
+            )
+
+        # Remove misleading 'verified' language for review-required findings
+        if decision == ValidationDecision.REVIEW_REQUIRED and candidate.explanation:
+            candidate.explanation = candidate.explanation.replace("verified prolonged presence pattern", "detected prolonged presence pattern")
+            candidate.explanation = candidate.explanation.replace("Verified prolonged presence", "Detected prolonged presence")
+            candidate.explanation = candidate.explanation.replace("verified incident", "detected incident pattern")
+            candidate.explanation = candidate.explanation.replace("verified theft pattern", "potential object-takeaway pattern supported by validated physical signals")
+            candidate.explanation = candidate.explanation.replace("Verified theft pattern", "Potential object-takeaway pattern supported by validated physical signals")
+            candidate.explanation = candidate.explanation.replace("verified potential object-takeaway pattern", "potential object-takeaway pattern supported by validated physical signals")
+
         return candidate
 
     def validate_all(

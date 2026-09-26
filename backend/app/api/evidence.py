@@ -219,7 +219,7 @@ def get_evidence_annotated(evidence_id: str):
 
 @router.get("/{evidence_id}/clip")
 def get_evidence_clip(evidence_id: str, request: Request):
-    """Securely stream original evidence video sub-clip with range support."""
+    """Securely stream evidence video sub-clip with browser-compatible H.264 transcoding and RFC 7233 range support."""
     _validate_evidence_id(evidence_id)
     service = EvidenceService()
     item = service.get_evidence_by_id(evidence_id)
@@ -242,7 +242,13 @@ def get_evidence_clip(evidence_id: str, request: Request):
     except ValueError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
 
-    return stream_video_file_with_ranges(db_item, request.headers.get("range"))
+    # Ensure browser-compatible playback file (H.264 + MP4) so standard HTML5 video elements can decode it
+    try:
+        playback_clip = ensure_evidence_clip_playback(evidence_id, db_item)
+        return stream_video_file_with_ranges(playback_clip, request.headers.get("range"))
+    except Exception as exc:
+        logger.warning(f"Fallback to direct clip stream for {evidence_id}: {exc}")
+        return stream_video_file_with_ranges(db_item, request.headers.get("range"))
 
 
 @router.get("/{evidence_id}/playback-status")
