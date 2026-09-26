@@ -46,10 +46,32 @@ class Settings:
     PORT: int = int(os.getenv("BACKEND_PORT", "8000"))
 
     # CORS
-    CORS_ORIGINS: List[str] = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ]
+    @property
+    def CORS_ORIGINS(self) -> List[str]:
+        default_origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
+        raw = os.getenv("CORS_ORIGINS") or os.getenv("BACKEND_CORS_ORIGINS")
+        if not raw:
+            return default_origins
+        raw = raw.strip()
+        if raw == "*":
+            return ["*"]
+        if raw.startswith("[") and raw.endswith("]"):
+            import json
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed if item]
+            except Exception:
+                pass
+        custom = [o.strip() for o in raw.split(",") if o.strip()]
+        combined = list(default_origins)
+        for c in custom:
+            if c not in combined:
+                combined.append(c)
+        return combined
 
     # Storage Paths
     @property

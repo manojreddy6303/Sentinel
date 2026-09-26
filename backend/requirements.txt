@@ -3,14 +3,17 @@ uvicorn>=0.22.0,<0.23.0
 pydantic>=2.0.0,<2.6.0
 pydantic-settings>=2.0.0,<2.2.0; python_version >= '3.8'
 python-multipart>=0.0.6
+sqlalchemy>=2.0.0
+greenlet>=3.0.0
+imageio-ffmpeg>=0.4.0
+psutil>=5.9.0
 # Phase 3: Video Intelligence Pipeline
-opencv-python>=4.8.0
+opencv-python-headless>=4.8.0
 ultralytics>=8.0.0,<8.1.0
-# torch/torchvision pinned to 1.12.x/0.13.x — Python 3.7 + torchvision 0.14 has
-# an OrderedDict typing incompatibility. Stay on 1.12.x until Python is upgraded.
-torch>=1.12.0,<1.13.0
-torchvision>=0.13.0,<0.14.0
-# urllib3 must stay below 2.0 on Python 3.7 (OpenSSL 1.1.0h limitation)
-urllib3>=1.21.1,<2.0
+# torch/torchvision pinned to >=1.12.0 / >=0.13.0
+torch>=1.12.0
+torchvision>=0.13.0
+urllib3>=1.21.1
 # Phase 9: Incident Dossier PDF Generation
 reportlab>=3.6.0,<4.0.0
+

@@ -35,6 +35,23 @@ def _validate_evidence_id(evidence_id: str) -> None:
         )
 
 
+def _resolve_evidence_path(evidence_id: str, stored_path: Optional[str], filename_suffix: str) -> Optional[Path]:
+    """
+    Resolve an evidence media path on disk.
+    If the database contains a legacy Windows path (e.g. C:\\Sentinel\\...) that does not
+    exist on Linux, seamlessly fall back to resolving against settings.STORAGE_EVIDENCE_DIR.
+    """
+    if stored_path:
+        p = Path(stored_path)
+        if p.exists() and p.is_file():
+            return p
+    # Fallback to active Railway storage evidence directory
+    cand = settings.STORAGE_EVIDENCE_DIR / f"{evidence_id}_{filename_suffix}"
+    if cand.exists() and cand.is_file():
+        return cand
+    return None
+
+
 def _safe_serve_file(file_path_str: str, media_type: str, filename_hint: str) -> FileResponse:
     """Safely verify that the file exists and is strictly within storage boundaries."""
     if not file_path_str:
@@ -110,9 +127,9 @@ def list_all_evidence(
 
         results = []
         for e in items:
-            has_snap = bool(e.snapshot_path and os.path.exists(e.snapshot_path))
-            has_ann = bool(e.annotated_snapshot_path and os.path.exists(e.annotated_snapshot_path))
-            has_clip = bool(e.clip_path and os.path.exists(e.clip_path))
+            has_snap = _resolve_evidence_path(e.id, e.snapshot_path, "snapshot.jpg") is not None
+            has_ann = _resolve_evidence_path(e.id, e.annotated_snapshot_path, "annotated.jpg") is not None
+            has_clip = _resolve_evidence_path(e.id, e.clip_path, "clip.mp4") is not None
 
             results.append({
                 "id": e.id,

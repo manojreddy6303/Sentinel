@@ -37,6 +37,7 @@ venv.bak/
 
 # Databases & Backups
 *.db
+!storage/sentinel.db
 *.db-journal
 *.db-wal
 *.db-shm
@@ -57,21 +58,32 @@ scratch/
 .DS_Store
 Thumbs.db
 
-# Storage artifacts (preserve directory structure via .gitkeep and README.md)
+# Storage artifacts (preserve directory structure and canonical demo assets)
 storage/*
+!storage/sentinel.db
 !storage/README.md
 !storage/uploads/
 storage/uploads/*
 !storage/uploads/.gitkeep
+!storage/uploads/*0d4d92f9*
+!storage/uploads/*WhatsApp*
 !storage/evidence/
 storage/evidence/*
 !storage/evidence/.gitkeep
+!storage/evidence/*ev_3983bb8f4de0*
+!storage/evidence/*ev_f972d41d3a2d*
+!storage/evidence_playback/
+storage/evidence_playback/*
+!storage/evidence_playback/.gitkeep
+!storage/evidence_playback/*ev_3983bb8f4de0*
+!storage/evidence_playback/*ev_f972d41d3a2d*
 !storage/reports/
 storage/reports/*
 !storage/reports/.gitkeep
 !storage/events/
 storage/events/*
 !storage/events/.gitkeep
+
 
 # YOLO / PyTorch model weights and Ultralytics cache
 *.pt

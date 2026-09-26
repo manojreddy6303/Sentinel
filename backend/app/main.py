@@ -78,6 +78,16 @@ app.include_router(cameras_router, prefix="/api")
 app.include_router(cyber_router, prefix="/api")
 
 
+@app.on_event("startup")
+def on_startup():
+    """Ensure persistent volume directories and seed database exist on startup."""
+    try:
+        from scripts.init_railway_storage import init_railway_storage
+        init_railway_storage()
+    except Exception:
+        pass
+
+
 @app.get("/")
 def root():
     """Root entry point providing basic API identification."""

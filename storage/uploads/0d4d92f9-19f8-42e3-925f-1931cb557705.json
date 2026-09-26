@@ -1,0 +1,17 @@
+{
+  "video_id": "0d4d92f9-19f8-42e3-925f-1931cb557705",
+  "filename": "uccrime_Burglary010_x264.mp4",
+  "saved_filename": "0d4d92f9-19f8-42e3-925f-1931cb557705_uccrime_Burglary010_x264.mp4",
+  "storage_path": "C:\\Sentinel\\storage\\uploads\\0d4d92f9-19f8-42e3-925f-1931cb557705_uccrime_Burglary010_x264.mp4",
+  "file_size_bytes": 2395763,
+  "content_type": "video/mp4",
+  "status": "processed",
+  "uploaded_at": "2026-09-09T15:10:29.718790+00:00",
+  "processed_at": "2026-09-25T10:49:11.780370+00:00",
+  "duration_seconds": 196.2667,
+  "fps": 30.0,
+  "frames_processed": 197,
+  "detections_count": 137,
+  "grouped_events_count": 25,
+  "raw_detections_count": 138
+}
