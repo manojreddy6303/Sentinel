@@ -51,6 +51,7 @@ class Settings:
         default_origins = [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
+            "https://sentinel-frontend-production-8154.up.railway.app",
         ]
         raw = os.getenv("CORS_ORIGINS") or os.getenv("BACKEND_CORS_ORIGINS")
         if not raw:

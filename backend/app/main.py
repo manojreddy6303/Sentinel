@@ -95,8 +95,20 @@ def root():
         "service": "Sentinel — AI-Powered Security Video Investigation Platform",
         "status": "online",
         "docs": "/docs",
-        "health": "/api/health",
+        "health": "/health",
+        "api_health": "/api/health",
         "videos_upload": "/api/videos/upload",
+    }
+
+
+@app.get("/health", tags=["Health"])
+def health():
+    """Minimal, fast healthcheck endpoint for Railway."""
+    return {
+        "status": "ok",
+        "service": "Sentinel Backend",
+        "version": settings.VERSION,
+        "environment": settings.ENVIRONMENT,
     }
 
 

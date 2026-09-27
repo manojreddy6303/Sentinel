@@ -87,6 +87,8 @@ storage/events/*
 
 # YOLO / PyTorch model weights and Ultralytics cache
 *.pt
+!yolov8n.pt
+!backend/yolov8n.pt
 *.pth
 *.onnx
 runs/

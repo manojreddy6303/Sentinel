@@ -27,7 +27,7 @@ def init_railway_storage():
     repo_root = Path(__file__).resolve().parent.parent
     seed_db = repo_root / "storage" / "sentinel.db"
     
-    if not target_db.exists():
+    if not target_db.exists() or target_db.stat().st_size == 0:
         if seed_db.exists() and seed_db.resolve() != target_db:
             print(f"[STORAGE_INIT] Initializing persistent database at {target_db} from seed...")
             shutil.copy2(str(seed_db), str(target_db))
@@ -35,11 +35,11 @@ def init_railway_storage():
         else:
             print("[STORAGE_INIT] Target database already at seed location or seed unavailable.")
     else:
-        print(f"[STORAGE_INIT] Persistent database exists at {target_db}. Preserving existing volume data.")
+        print(f"[STORAGE_INIT] Persistent database exists at {target_db} ({target_db.stat().st_size} bytes). Preserving existing volume data.")
 
     # 3. Seed canonical uploads & evidence files if destination is an external mount (/storage)
     if seed_db.resolve() != target_db:
-        for sub in ["uploads", "evidence", "evidence_playback"]:
+        for sub in ["uploads", "evidence", "evidence_playback", "events", "reports"]:
             src_dir = repo_root / "storage" / sub
             dst_dir = storage_base / sub
             if src_dir.exists():

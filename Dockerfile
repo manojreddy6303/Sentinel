@@ -8,12 +8,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libgomp1 \
     libxcb1 \
+    libx11-6 \
+    libxext6 \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python requirements
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-cache and verify YOLO model weights during build
+RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # Copy application source code
 COPY . .
