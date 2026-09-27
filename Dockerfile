@@ -17,11 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-cache and verify YOLO model weights during build
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
-
 # Copy application source code
 COPY . .
+
+# Verify YOLO model loading with compatible torch
+RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # Set default production environment variables
 ENV PYTHONPATH=.
