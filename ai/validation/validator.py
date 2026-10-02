@@ -190,17 +190,27 @@ class DetectionValidator:
                 reason=f"Validated by contextual association with person ({conf:.2f})",
             )
 
-        # Area check normalized to canonical reference frame (prevents 4K sensor bias)
+        # Area check normalized to canonical reference frame smoothly across all resolutions
         canonical_area = self.policy.canonical_reference_width * self.policy.canonical_reference_height
         if frame_width and frame_height and frame_width > 0 and frame_height > 0:
-            norm_area = canonical_area if (frame_width >= 2560 or frame_height >= 1440) else (frame_width * frame_height)
-            effective_area_frac = area_pixels / norm_area
+            frame_area = frame_width * frame_height
+            scale_to_canonical = frame_area / canonical_area
+            # Scale area pixels to 1080p-equivalent area to prevent sensor resolution bias
+            equiv_area = area_pixels / scale_to_canonical if scale_to_canonical > 0 else area_pixels
+            effective_area_frac = equiv_area / canonical_area
             if effective_area_frac < rule.min_area_fraction:
                 if conf >= rule.min_confidence_standalone:
                     return ValidationResult(
                         status=ValidationStatus.UNCERTAIN,
                         score=conf,
                         reason=f"Small isolated detection (area fraction {effective_area_frac:.5f} < {rule.min_area_fraction:.5f}) with standalone confidence ({conf:.2f})",
+                    )
+                elif obj_class in {"backpack", "suitcase", "handbag"} and conf >= rule.min_confidence_with_temporal:
+                    # Unattended luggage catch-22 fix: allow to reach UNCERTAIN for dwell evaluation
+                    return ValidationResult(
+                        status=ValidationStatus.UNCERTAIN,
+                        score=conf,
+                        reason=f"Candidate small unattended {obj_class} ({conf:.2f}) pending temporal dwell evaluation",
                     )
                 else:
                     return ValidationResult(
@@ -235,6 +245,13 @@ class DetectionValidator:
                     status=ValidationStatus.UNCERTAIN,
                     score=conf,
                     reason=f"Unconfirmed single-frame detection with intermediate confidence ({conf:.2f})",
+                )
+            elif obj_class in {"backpack", "suitcase", "handbag"} and conf >= (rule.min_confidence_with_temporal * 0.90):
+                # Unattended luggage catch-22 fix: allow marginal confidence luggage to reach UNCERTAIN
+                return ValidationResult(
+                    status=ValidationStatus.UNCERTAIN,
+                    score=conf,
+                    reason=f"Candidate unattended {obj_class} ({conf:.2f}) pending temporal dwell evaluation",
                 )
             else:
                 return ValidationResult(

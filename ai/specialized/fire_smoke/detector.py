@@ -132,12 +132,12 @@ class FireVisualDetector(BaseSpecializedDetector):
         # Condition 1: Y(x,y) >= Cb(x,y) and Cr(x,y) >= Cb(x,y)
         rule_y_cb = (y >= cb)
         rule_cr_cb = (cr >= cb)
-        rule_diff = (cv2.absdiff(cr, cb) >= 28)
+        rule_diff = (cv2.absdiff(cr, cb) >= 32)
 
-        # Condition 2: Flame HSV range (Bright orange-red-yellow)
+        # Condition 2: Flame HSV range (Incandescent bright orange-red-yellow)
         rule_h = ((hue <= 30) | (hue >= 170))
-        rule_s = (sat >= 70)
-        rule_v = (val >= 180)
+        rule_s = (sat >= 80)
+        rule_v = (val >= 210)
 
         # Combined flame mask
         flame_mask = (rule_y_cb & rule_cr_cb & rule_diff & rule_h & rule_s & rule_v).astype(np.uint8) * 255
@@ -181,10 +181,61 @@ class FireVisualDetector(BaseSpecializedDetector):
             max_lum = float(np.max(roi_val))
             std_lum = float(np.std(roi_val))
 
-            # Suppress static solid orange surfaces (safety vests, traffic cones, signs)
-            # Solid painted surfaces have very low internal variance (std < 8.0) and high geometric compactness
-            is_static_surface = (std_lum < 7.0 and circularity > 0.65)
+            # Thermal core requirement: Genuine combustion fire exhibits an incandescent core
+            # (>232 in 8-bit scale). Non-combustion red/orange surfaces lack this core.
+            if max_lum < 232.0:
+                continue
+
+            # Suppress static solid orange surfaces (safety vests, traffic cones, signs, posters)
+            # Solid painted surfaces have low internal variance (std < 9.0) and high geometric compactness
+            is_static_surface = (std_lum < 9.0 and circularity > 0.50) or (std_lum < 6.5)
             if is_static_surface:
+                continue
+
+            # Person clothing / accessory suppression:
+            # Prevents human clothing (red dresses, orange jackets, red bags/shoes) from triggering false fire
+            person_boxes = (context or {}).get("person_bounding_boxes", [])
+            is_person_clothing = False
+            cnt_cx = (orig_x1 + orig_x2) / 2.0
+            cnt_cy = (orig_y1 + orig_y2) / 2.0
+            cnt_area = (orig_x2 - orig_x1) * (orig_y2 - orig_y1)
+
+            for pb in person_boxes:
+                px1 = float(pb.get("x1", 0.0))
+                py1 = float(pb.get("y1", 0.0))
+                px2 = float(pb.get("x2", 0.0))
+                py2 = float(pb.get("y2", 0.0))
+                pw = max(1.0, px2 - px1)
+                ph = max(1.0, py2 - py1)
+                p_area = pw * ph
+
+                # Check if centroid is within expanded person bounding box (15% margin)
+                if (px1 - pw * 0.15) <= cnt_cx <= (px2 + pw * 0.15) and (py1 - ph * 0.05) <= cnt_cy <= (py2 + ph * 0.05):
+                    # Unless area has extreme thermal luminance (>250) and violent turbulence (>28), it's clothing/accessory
+                    if max_lum < 250.0 or std_lum < 28.0 or (cnt_area < 0.45 * p_area):
+                        is_person_clothing = True
+                        break
+
+            if is_person_clothing:
+                continue
+
+            # Vehicle lighting / tail lamp suppression:
+            # Prevents vehicle brake lights, blinkers, and red body paint from triggering false fire
+            vehicle_boxes = (context or {}).get("vehicle_bounding_boxes", [])
+            is_vehicle_light = False
+            for vb in vehicle_boxes:
+                vx1 = float(vb.get("x1", 0.0))
+                vy1 = float(vb.get("y1", 0.0))
+                vx2 = float(vb.get("x2", 0.0))
+                vy2 = float(vb.get("y2", 0.0))
+                vw = max(1.0, vx2 - vx1)
+                vh = max(1.0, vy2 - vy1)
+                if vx1 <= cnt_cx <= vx2 and vy1 <= cnt_cy <= vy2:
+                    if max_lum < 252.0 or std_lum < 28.0 or (cnt_area < 0.15 * (vw * vh)):
+                        is_vehicle_light = True
+                        break
+
+            if is_vehicle_light:
                 continue
 
             # Confidence based on flame luminance saturation consistency & texture turbulence
@@ -221,6 +272,8 @@ class FireVisualDetector(BaseSpecializedDetector):
             observations.append(obs)
 
         return observations
+
+    detect = detect_frame
 
 
 class SmokeVisualDetector(BaseSpecializedDetector):

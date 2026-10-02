@@ -65,6 +65,32 @@ class SpatialRelationshipEngine:
         return math.hypot(c1[0] - c2[0], c1[1] - c2[1])
 
     @staticmethod
+    def normalized_centroid_distance(
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
+    ) -> float:
+        """Euclidean distance normalized by frame diagonal."""
+        raw = math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+        if frame_width and frame_height and frame_width > 0 and frame_height > 0:
+            diag = math.hypot(frame_width, frame_height)
+            return raw / diag if diag > 0 else raw
+        return raw / 2202.906
+
+    @staticmethod
+    def normalized_bbox_distance(
+        box1: BoundingBox,
+        box2: BoundingBox,
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
+    ) -> float:
+        """Centroid distance between two bounding boxes normalized by frame diagonal."""
+        c1 = box1.centroid
+        c2 = box2.centroid
+        return SpatialRelationshipEngine.normalized_centroid_distance(c1, c2, frame_width, frame_height)
+
+    @staticmethod
     def relative_orientation(from_point: Tuple[float, float], to_point: Tuple[float, float]) -> str:
         """
         Determine coarse relative directional relationship of `to_point` from `from_point`.

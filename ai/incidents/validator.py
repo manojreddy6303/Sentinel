@@ -170,6 +170,8 @@ class IncidentCandidateValidator:
                     "unrestricted access",
                     "transient visual glitch",
                     "static surface chromaticity",
+                    "person clothing / accessory chromaticity",
+                    "absence of smoke plume",
                     "transient dispersion artifact",
                     "global atmospheric haze",
                     "video compression artifact",
@@ -333,3 +335,7 @@ class IncidentCandidateValidator:
         for cand in candidates:
             validated.append(self.validate_candidate(cand, context=context, scene_context=scene_context))
         return validated
+
+
+# Backward-compatible alias
+IncidentValidationEngine = IncidentCandidateValidator

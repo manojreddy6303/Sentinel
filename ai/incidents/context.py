@@ -47,12 +47,24 @@ class IncidentContextBuilder:
             if d.get("validation_status") not in ("REJECTED", "rejected")
         ]
 
-        # 1. Compute frame-by-frame motion for each track
+        # 1. Compute frame-by-frame motion for each track with resolution awareness
         track_motions: Dict[str, List[TrackMotion]] = {}
         motion_summaries: Dict[str, Dict[str, Any]] = {}
 
+        f_w = float(meta.get("width") or 0.0) if meta else 0.0
+        f_h = float(meta.get("height") or 0.0) if meta else 0.0
+        if f_w <= 0.0 or f_h <= 0.0:
+            for d in clean_validated:
+                iw = float(d.get("image_width") or 0.0)
+                ih = float(d.get("image_height") or 0.0)
+                if iw > 0 and ih > 0:
+                    f_w, f_h = iw, ih
+                    break
+
         for trk in tracks:
-            motions = self.motion_engine.compute_track_motion(trk)
+            motions = self.motion_engine.compute_track_motion(
+                trk, frame_width=f_w if f_w > 0 else None, frame_height=f_h if f_h > 0 else None
+            )
             track_motions[trk.track_id] = motions
             summary = self.motion_engine.summarize_track_motion(motions)
             motion_summaries[trk.track_id] = summary

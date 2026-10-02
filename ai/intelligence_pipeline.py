@@ -17,12 +17,14 @@ from ai.schemas import (
     BoundingBox,
     TrackedObject,
     VehicleAttribute,
+    PersonVisualAttributes,
     FaceDetection,
     ZoneDefinition,
     SecurityEvent,
 )
 from ai.tracking.tracker import ObjectTracker
 from ai.attributes.color_analyzer import VehicleColorAnalyzer
+from ai.attributes.person_analyzer import PersonAttributeAnalyzer
 from ai.faces.face_detector import FaceDetector
 from ai.zones.zone_manager import ZoneManager
 from ai.activity.activity_analyzer import ActivityAnalyzer
@@ -62,6 +64,7 @@ class SecurityIntelligencePipeline:
         self,
         zones: Optional[List[ZoneDefinition]] = None,
         color_analyzer: Optional[VehicleColorAnalyzer] = None,
+        person_analyzer: Optional[PersonAttributeAnalyzer] = None,
         face_detector: Optional[FaceDetector] = None,
         tracker: Optional[ObjectTracker] = None,
         activity_analyzer: Optional[ActivityAnalyzer] = None,
@@ -75,6 +78,7 @@ class SecurityIntelligencePipeline:
         self.tracker = tracker or ObjectTracker()
         self.color_analyzer = color_analyzer or VehicleColorAnalyzer()
         self.face_detector = face_detector or FaceDetector()
+        self.person_analyzer = person_analyzer or PersonAttributeAnalyzer(face_detector=self.face_detector)
         self.zone_manager = ZoneManager(zones=zones)
         self.activity_analyzer = activity_analyzer or ActivityAnalyzer()
         self.behavior_analyzer = behavior_analyzer or BehaviorAnalyzer()
@@ -124,7 +128,7 @@ class SecurityIntelligencePipeline:
         video_w: Optional[float] = frame_width
         video_h: Optional[float] = frame_height
 
-        if sampled_frames:
+        if sampled_frames and (video_w is None or video_h is None):
             for smp in sampled_frames.values():
                 if hasattr(smp, "shape") and len(smp.shape) >= 2:
                     video_h, video_w = float(smp.shape[0]), float(smp.shape[1])
@@ -140,6 +144,7 @@ class SecurityIntelligencePipeline:
 
         tracks: List[TrackedObject] = []
         vehicle_attributes: List[VehicleAttribute] = []
+        person_attributes: List[PersonVisualAttributes] = []
         face_detections: List[FaceDetection] = []
         security_events: List[SecurityEvent] = []
         specialized_observations: List[Any] = []
@@ -149,6 +154,7 @@ class SecurityIntelligencePipeline:
         health_registry.reset()
         health_registry.register_detector("yolo_detector", version="1.0.0", status=DetectorOperationalStatus.AVAILABLE.value, model_type=DetectorModelType.TRAINED_MODEL.value)
         health_registry.register_detector("vehicle_color_analyzer", version="1.0.0", status=DetectorOperationalStatus.AVAILABLE.value, model_type=DetectorModelType.HEURISTIC_CV.value)
+        health_registry.register_detector("person_analyzer", version="1.0.0", status=DetectorOperationalStatus.AVAILABLE.value, model_type=DetectorModelType.HEURISTIC_CV.value)
         health_registry.register_detector("face_detector", version="1.0.0", status=DetectorOperationalStatus.AVAILABLE.value, model_type=DetectorModelType.TRAINED_MODEL.value)
 
         for spec_name in ["fire_visual_detector", "smoke_visual_detector", "weapon_visual_detector", "pose_action_detector"]:
@@ -284,11 +290,36 @@ class SecurityIntelligencePipeline:
 
                     track_id = matched_track.track_id if matched_track else None
 
-                    # Visual Color Analysis (vehicles and persons)
-                    if cls in ["car", "bus", "truck", "motorcycle", "person"]:
+                    # Visual Attribute Analysis
+                    # 1. Person Attributes (Anatomical upper/lower clothing, headwear, carried objects, face telemetry)
+                    if cls == "person":
                         det_conf = float(det.get("confidence", 0.0))
-                        min_color_conf = 0.35 if cls == "person" else 0.40
-                        if det_conf >= min_color_conf or (matched_track and matched_track.detection_count >= 2):
+                        if det_conf >= 0.35 or (matched_track and matched_track.detection_count >= 2):
+                            p_attr = self.person_analyzer.analyze(
+                                frame_bgr=frame_bgr,
+                                person_bbox=bbox,
+                                timestamp=t,
+                                track_id=track_id,
+                            )
+                            person_attributes.append(p_attr)
+                            if matched_track:
+                                matched_track.visual_attributes = p_attr.to_dict()
+                                matched_track.attribute_history.append({
+                                    "timestamp": t,
+                                    "upper_clothing": p_attr.upper_clothing.to_dict() if p_attr.upper_clothing else None,
+                                    "lower_clothing": p_attr.lower_clothing.to_dict() if p_attr.lower_clothing else None,
+                                    "headwear": p_attr.headwear_present,
+                                    "face_present": p_attr.face_telemetry.face_present if p_attr.face_telemetry else False,
+                                })
+                                # Only set matched_track.color if upper clothing is confirmed with good confidence
+                                if p_attr.upper_clothing and p_attr.upper_clothing.is_confirmed:
+                                    matched_track.color = p_attr.upper_clothing.color
+                                    matched_track.color_confidence = p_attr.upper_clothing.confidence
+
+                    # 2. Vehicle Color & Orientation Analysis
+                    elif cls in ["car", "bus", "truck", "motorcycle"]:
+                        det_conf = float(det.get("confidence", 0.0))
+                        if det_conf >= 0.40 or (matched_track and matched_track.detection_count >= 2):
                             v_attr = self.color_analyzer.analyze(
                                 frame_bgr=frame_bgr,
                                 bbox=bbox,
@@ -296,11 +327,17 @@ class SecurityIntelligencePipeline:
                                 object_class=cls,
                                 track_id=track_id,
                             )
-                            if cls != "person":
-                                vehicle_attributes.append(v_attr)
-                            if matched_track and v_attr.color != "unknown":
+                            vehicle_attributes.append(v_attr)
+                            if matched_track and v_attr.color != "uncertain":
                                 matched_track.color = v_attr.color
                                 matched_track.color_confidence = v_attr.confidence
+                                matched_track.visual_attributes = v_attr.to_dict()
+                                matched_track.attribute_history.append({
+                                    "timestamp": t,
+                                    "color": v_attr.color,
+                                    "secondary_color": v_attr.secondary_color,
+                                    "is_illumination_uncertain": v_attr.is_illumination_uncertain,
+                                })
 
                     # Face Detection (Visual region only; strict safety)
                     if cls == "person":
@@ -378,6 +415,7 @@ class SecurityIntelligencePipeline:
             "tracks": validated_tracks,
             "all_tracks": all_tracks,
             "vehicle_attributes": vehicle_attributes,
+            "person_attributes": person_attributes,
             "face_detections": face_detections,
             "security_events": security_events,
             "incidents": incidents,

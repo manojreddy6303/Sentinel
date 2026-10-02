@@ -66,11 +66,53 @@ import threading
 _processing_locks: Dict[str, threading.Lock] = {}
 _processing_locks_guard = threading.Lock()
 
+# Phase 20.3: Global bounded concurrency lock for heavy video processing per worker
+_heavy_processing_semaphore = threading.Semaphore(settings.MAX_CONCURRENT_HEAVY_JOBS)
+
 def _get_video_lock(video_id: str) -> threading.Lock:
     with _processing_locks_guard:
         if video_id not in _processing_locks:
             _processing_locks[video_id] = threading.Lock()
         return _processing_locks[video_id]
+
+
+def recover_stale_processing_jobs() -> int:
+    """
+    Phase 20.3 Crash-Safe Video Processing State:
+    Inspect database on server startup for videos left in 'processing' status
+    (e.g., due to an ungraceful container termination or OOM kill) and safely
+    transition them to 'interrupted' / 'failed', preserving source files and evidence.
+    """
+    recovered_count = 0
+    try:
+        from database.session import SessionLocal
+        from database.models import VideoModel
+        db = SessionLocal()
+        try:
+            stale_videos = db.query(VideoModel).filter(VideoModel.status == "processing").all()
+            for v in stale_videos:
+                v.status = "interrupted"
+                recovered_count += 1
+                try:
+                    meta_path = settings.STORAGE_UPLOADS_DIR / f"{v.id}.json"
+                    if meta_path.exists():
+                        with open(meta_path, "r", encoding="utf-8") as f_meta:
+                            meta = json.load(f_meta)
+                        meta["status"] = "interrupted"
+                        meta["error"] = "Processing was interrupted by a server restart. Video can be safely reprocessed."
+                        meta["interrupted_at"] = datetime.now(timezone.utc).isoformat()
+                        with open(meta_path, "w", encoding="utf-8") as f_meta:
+                            json.dump(meta, f_meta, indent=2)
+                except Exception as meta_exc:
+                    logger.warning(f"Could not update sidecar metadata for interrupted video {v.id}: {meta_exc}")
+            if recovered_count > 0:
+                db.commit()
+                logger.info(f"Phase 20.3 Crash Recovery: Safely marked {recovered_count} interrupted video(s) as 'interrupted'.")
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning(f"Could not check/recover stale video processing jobs: {exc}")
+    return recovered_count
 
 
 def _get_detector() -> "YOLODetector":
@@ -663,7 +705,7 @@ def process_video(
                 detail=f"Video with ID '{video_id}' not found. Please upload the video first.",
             )
 
-    # 1.5 Idempotency guard: prevent duplicate concurrent processing jobs
+    # 1.5 Idempotency guard: prevent duplicate concurrent processing jobs for the same video
     v_lock = _get_video_lock(video_id)
     if not v_lock.acquire(blocking=False):
         return {
@@ -671,6 +713,19 @@ def process_video(
             "status": "processing",
             "message": "Video is already being processed. Concurrent processing prevented.",
         }
+
+    # Phase 20.3: Prevent concurrent heavy video processing across the worker
+    heavy_lock_acquired = _heavy_processing_semaphore.acquire(blocking=False)
+    if not heavy_lock_acquired:
+        v_lock.release()
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "video_id": video_id,
+                "status": "busy",
+                "message": "Server is currently processing another video. Concurrent heavy processing is serialized to protect system memory.",
+            },
+        )
 
     try:
         from database.session import SessionLocal
@@ -742,9 +797,9 @@ def process_video(
         frame_w = metadata.get("width")
         frame_h = metadata.get("height")
 
-        # Maintain standard 640 YOLO feature resolution for surveillance object detection
-        # (low-resolution inputs like 320x240 contain small objects like bags/suitcases that require >=640 grid)
-        effective_imgsz = 640
+        # Resolution-Aware Inference Policy (Phase 20)
+        from ai.detection.inference_policy import InferenceResolutionPolicy
+        effective_imgsz = InferenceResolutionPolicy.select_inference_size(frame_w, frame_h)
 
         # 3. Get detector (loaded once per process)
         try:
@@ -758,10 +813,16 @@ def process_video(
 
         # 4. Sample frames and run detection with mini-batching for maximum throughput
         frame_detections: List[Dict[str, Any]] = []
-        sampled_frames_cache: Dict[float, Any] = {}
+        from ai.video.frame_cache import BoundedFrameCache
+        sampled_frames_cache = BoundedFrameCache(
+            max_frames=1200,
+            max_memory_mb=settings.FRAME_CACHE_MAX_MEMORY_MB,
+            video_path=str(video_file_path),
+        )
         frames_processed = 0
 
-        BATCH_SIZE = 32
+        # Phase 20.3: Memory-safe batch size (configurable, default 4)
+        BATCH_SIZE = settings.YOLO_BATCH_SIZE
         batch_frames: List[Any] = []
         batch_meta: List[tuple] = []  # (frame_number, timestamp)
 
@@ -791,13 +852,28 @@ def process_video(
             batch_frames.clear()
             batch_meta.clear()
 
+        from ai.enhancement import SceneConditionAnalyzer, AdaptiveLowLightEnhancer
+        enhancer = AdaptiveLowLightEnhancer()
+        scene_report = None
+
         try:
             for frame_number, timestamp, frame_bgr in processor.sample_frames():
-                batch_frames.append(frame_bgr)
+                # Analyze scene lighting condition on initial frames
+                if scene_report is None:
+                    scene_report = SceneConditionAnalyzer.analyze(frame_bgr)
+
+                # Store original, authoritative frame into memory-safe bounded cache
+                sampled_frames_cache[timestamp] = frame_bgr
+
+                # Conditionally enhance analytical proxy for YOLO inference if scene is low-light
+                inference_frame = frame_bgr
+                if scene_report and scene_report.needs_enhancement:
+                    enhanced_frame, was_enhanced, _ = enhancer.enhance_if_needed(frame_bgr, scene_report)
+                    if was_enhanced:
+                        inference_frame = enhanced_frame
+
+                batch_frames.append(inference_frame)
                 batch_meta.append((frame_number, timestamp))
-                # Cache sampled frame for downstream visual intelligence (bounded to 1200 frames = 20 mins)
-                if len(sampled_frames_cache) < 1200:
-                    sampled_frames_cache[round(timestamp, 3)] = frame_bgr
 
                 if len(batch_frames) >= BATCH_SIZE:
                     _flush_batch()
@@ -1001,7 +1077,45 @@ def process_video(
             "grouped_events_count": len(grouped_events),
         }
     finally:
-        v_lock.release()
+        try:
+            v_lock.release()
+        except Exception:
+            pass
+        if heavy_lock_acquired:
+            try:
+                _heavy_processing_semaphore.release()
+            except Exception:
+                pass
+
+        # Phase 20.3: Explicit Scoped Memory Cleanup
+        try:
+            if 'batch_frames' in locals() and batch_frames is not None:
+                batch_frames.clear()
+                del batch_frames
+            if 'batch_meta' in locals() and batch_meta is not None:
+                batch_meta.clear()
+                del batch_meta
+            if 'sampled_frames_cache' in locals() and sampled_frames_cache is not None:
+                if hasattr(sampled_frames_cache, 'clear'):
+                    sampled_frames_cache.clear()
+                del sampled_frames_cache
+            if 'frame_detections' in locals() and frame_detections is not None:
+                frame_detections.clear()
+                del frame_detections
+            if 'processor' in locals() and processor is not None:
+                del processor
+
+            import gc
+            gc.collect()
+
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+        except Exception as _clean_err:
+            logger.debug("Post-processing memory cleanup notice: %s", _clean_err)
 
 
 @router.get("/{video_id}/events")

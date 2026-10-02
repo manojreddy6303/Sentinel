@@ -55,13 +55,17 @@ class AbandonedObjectDetector(BaseIncidentDetector):
         person_tracks = [t for t in context.tracks if t.object_class == "person"]
         belonging_tracks = [t for t in context.tracks if t.object_class in self.belonging_classes]
 
+        scale_factor = getattr(context, "resolution_scale_factor", 1.0)
+        effective_sep_distance = self.abandoned_separation_distance * scale_factor
+        effective_net_disp = 40.0 * scale_factor
+
         for b_track in belonging_tracks:
             if b_track.duration_seconds < self.stationary_threshold_seconds or len(b_track.trajectory) < 2:
                 continue
 
             summary = context.get_motion_summary(b_track.track_id) or {}
             net_disp = summary.get("net_displacement", 0.0)
-            if net_disp > 40.0:  # Moving object is being carried, not abandoned
+            if net_disp > effective_net_disp:  # Moving object is being carried, not abandoned
                 continue
 
             b_start_x, b_start_y = b_track.trajectory[0][1], b_track.trajectory[0][2]
@@ -74,7 +78,7 @@ class AbandonedObjectDetector(BaseIncidentDetector):
                     continue
                 p_early = [pt for pt in p_track.trajectory if pt[0] <= b_track.first_seen + 2.0]
                 for pt in p_early:
-                    if math.hypot(pt[1] - b_start_x, pt[2] - b_start_y) <= self.abandoned_separation_distance:
+                    if math.hypot(pt[1] - b_start_x, pt[2] - b_start_y) <= effective_sep_distance:
                         associated_person_id = p_track.track_id
                         break
                 if associated_person_id:
@@ -87,7 +91,7 @@ class AbandonedObjectDetector(BaseIncidentDetector):
                     continue
                 p_late = [pt for pt in p_track.trajectory if pt[0] >= b_track.last_seen - 2.0]
                 for pt in p_late:
-                    if math.hypot(pt[1] - b_end_x, pt[2] - b_end_y) <= self.abandoned_separation_distance:
+                    if math.hypot(pt[1] - b_end_x, pt[2] - b_end_y) <= effective_sep_distance:
                         person_nearby_at_end = True
                         break
                 if person_nearby_at_end:

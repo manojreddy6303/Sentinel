@@ -397,22 +397,126 @@ class MockLLMProvider(LLMProvider):
         return " ".join(lines)
 
 
+class DeterministicFallbackProvider(MockLLMProvider):
+    """
+    Zero-dependency deterministic fallback provider.
+    Provides reliable, rule-based query parsing and grounded evidence synthesis
+    without any external network calls, API keys, or GPU requirements.
+    """
+    def __init__(self):
+        super().__init__(is_available_flag=True)
+
+
+class LocalLLMProvider(LLMProvider):
+    """
+    Local AI Provider (Phase 20.2 / Step 12).
+    Connects to local OpenAI-compatible endpoints (Ollama, vLLM, LMStudio, llama.cpp)
+    and falls back deterministically to DeterministicFallbackProvider if unavailable.
+    """
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: float = 8.0,
+    ):
+        self.base_url = (base_url or "http://localhost:11434/v1").rstrip("/")
+        self.model = model or "llama3"
+        self.timeout = timeout
+        self.fallback = DeterministicFallbackProvider()
+
+    def is_available(self) -> bool:
+        try:
+            resp = requests.get(f"{self.base_url}/models", timeout=2.0)
+            return resp.status_code == 200
+        except Exception:
+            # Fallback is always available
+            return True
+
+    def generate_structured_intent(
+        self, user_query: str, history: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """Attempt local LLM structured extraction, falling back to deterministic CV rules."""
+        try:
+            url = f"{self.base_url}/chat/completions"
+            messages = [
+                {"role": "system", "content": "You are a CCTV search query parser. Return JSON only with fields: intent, object_classes, start_time, end_time."},
+                {"role": "user", "content": user_query}
+            ]
+            resp = requests.post(
+                url,
+                json={"model": self.model, "messages": messages, "temperature": 0.0},
+                timeout=self.timeout,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                # Parse JSON if possible
+                m = re.search(r"\{.*\}", content, re.DOTALL)
+                if m:
+                    return json.loads(m.group(0))
+        except Exception as e:
+            logger.debug("Local LLM unavailable or error (%s), using deterministic fallback", e)
+
+        return self.fallback.generate_structured_intent(user_query, history)
+
+    def generate_grounded_response(
+        self,
+        user_query: str,
+        retrieved_data: Dict[str, Any],
+        history: Optional[List[Dict[str, str]]] = None,
+        context_notes: Optional[str] = None,
+    ) -> str:
+        """Attempt local LLM grounded response, falling back to deterministic formatting."""
+        try:
+            url = f"{self.base_url}/chat/completions"
+            prompt = f"User query: {user_query}\nRetrieved Sentinel database records: {json.dumps(retrieved_data)}\nSynthesize an objective grounded summary."
+            messages = [
+                {"role": "system", "content": "You are an objective CCTV investigation assistant. Only cite verified records."},
+                {"role": "user", "content": prompt}
+            ]
+            resp = requests.post(
+                url,
+                json={"model": self.model, "messages": messages, "temperature": 0.1},
+                timeout=self.timeout,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.debug("Local LLM response error (%s), using deterministic fallback", e)
+
+        return self.fallback.generate_grounded_response(user_query, retrieved_data, history, context_notes)
+
+
 def get_llm_provider(
     provider_name: Optional[str] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
 ) -> LLMProvider:
-    """Factory function to instantiate the configured LLM provider."""
+    """
+    Factory function to instantiate the configured LLM provider.
+    Supports Local LLM, Gemini (optional), Mock, and Deterministic Fallback.
+    """
     from backend.app.core.config import settings
 
-    prov = (provider_name or settings.LLM_PROVIDER or "gemini").lower()
-    key = api_key if api_key is not None else settings.LLM_API_KEY
-    mdl = model or settings.LLM_MODEL or "gemini-flash-latest"
+    prov = (provider_name or getattr(settings, "LLM_PROVIDER", "deterministic") or "deterministic").lower()
+    key = api_key if api_key is not None else getattr(settings, "LLM_API_KEY", None)
+    mdl = model or getattr(settings, "LLM_MODEL", "gemini-flash-latest")
 
     if prov == "mock":
         return MockLLMProvider()
+    elif prov in ("deterministic", "fallback"):
+        return DeterministicFallbackProvider()
+    elif prov in ("local", "ollama", "vllm", "local_ai"):
+        local_url = getattr(settings, "LOCAL_LLM_URL", "http://localhost:11434/v1")
+        local_model = getattr(settings, "LOCAL_LLM_MODEL", "llama3")
+        return LocalLLMProvider(base_url=local_url, model=local_model)
     elif prov == "gemini":
+        if not key:
+            logger.info("Gemini provider requested without API key; falling back gracefully to DeterministicFallbackProvider.")
+            return DeterministicFallbackProvider()
         return GeminiProvider(api_key=key, model=mdl)
     else:
-        logger.warning(f"Unknown LLM provider '{prov}', defaulting to Gemini provider.")
-        return GeminiProvider(api_key=key, model=mdl)
+        logger.warning(f"Unknown LLM provider '{prov}', using DeterministicFallbackProvider.")
+        return DeterministicFallbackProvider()

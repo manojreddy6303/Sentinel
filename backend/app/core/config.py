@@ -176,6 +176,9 @@ class Settings:
     # Minimum confidence threshold for accepting a YOLO detection [0.0, 1.0].
     YOLO_CONFIDENCE_THRESHOLD: float = float(os.getenv("YOLO_CONFIDENCE_THRESHOLD", "0.25"))
 
+    # Phase 20: Candidate generation threshold passed to model inference before Sentinel validation
+    YOLO_CANDIDATE_CONFIDENCE: float = float(os.getenv("YOLO_CANDIDATE_CONFIDENCE", "0.20"))
+
     # Optional per-class minimum confidence overrides [0.0, 1.0].
     CLASS_CONFIDENCE_THRESHOLDS: Dict[str, float] = {}
 
@@ -219,9 +222,24 @@ class Settings:
     SMOKE_DETECTION_ENABLED: bool = os.getenv("SMOKE_DETECTION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
     WEAPON_DETECTION_ENABLED: bool = os.getenv("WEAPON_DETECTION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
     POSE_DETECTION_ENABLED: bool = os.getenv("POSE_DETECTION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
-    FIRE_MODEL_PATH: Optional[str] = os.getenv("FIRE_MODEL_PATH", None)
-    SMOKE_MODEL_PATH: Optional[str] = os.getenv("SMOKE_MODEL_PATH", None)
-    WEAPON_MODEL_PATH: Optional[str] = os.getenv("WEAPON_MODEL_PATH", None)
+    # -------------------------------------------------------------------------
+    # Phase 20.3: Production Memory Hardening Configuration
+    # -------------------------------------------------------------------------
+    # Inference batch size for YOLO object detection.
+    # Default = 4 (memory-safe for CPU container limits, down from 32).
+    YOLO_BATCH_SIZE: int = int(os.getenv("YOLO_BATCH_SIZE", "4"))
+
+    # Maximum memory budget (MB) for bounded frame caching.
+    # Default = 64.0 MB (replaces uncalibrated 512.0 MB budget).
+    FRAME_CACHE_MAX_MEMORY_MB: float = float(os.getenv("FRAME_CACHE_MAX_MEMORY_MB", "64.0"))
+
+    # Concurrency limit for heavy video analysis per worker.
+    # Default = 1 (enforces sequential heavy video processing to prevent OOM spikes).
+    MAX_CONCURRENT_HEAVY_JOBS: int = int(os.getenv("MAX_CONCURRENT_HEAVY_JOBS", "1"))
+
+    # PyTorch and OpenMP CPU thread limit.
+    # Default = 2 (prevents thread-local memory explosion on multi-core host nodes).
+    TORCH_NUM_THREADS: int = int(os.getenv("TORCH_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "2")))
 
 
 settings = Settings()

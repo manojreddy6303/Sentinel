@@ -9,9 +9,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Dict, Any, Optional, Tuple
+import math
 import uuid
 
 from ai.schemas import BoundingBox, TrackedObject, VehicleAttribute, FaceDetection, ZoneDefinition, SecurityEvent
+
+# Canonical 1080p surveillance reference diagonal: sqrt(1920^2 + 1080^2) ~= 2202.906
+CANONICAL_REFERENCE_DIAGONAL: float = 2202.906
 
 
 class IncidentCategory(str, Enum):
@@ -211,6 +215,10 @@ class IncidentCandidate:
     incident_metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
+    @property
+    def reasons(self) -> List[str]:
+        return self.validation_reasons
+
     def to_security_event(self) -> SecurityEvent:
         """
         Convert IncidentCandidate to Sentinel's core SecurityEvent for 100% backward
@@ -346,3 +354,45 @@ class IncidentContext:
 
     def get_motion_summary(self, track_id: str) -> Optional[Dict[str, Any]]:
         return self.motion_summaries.get(track_id)
+
+    # Canonical 1080p surveillance reference diagonal: sqrt(1920^2 + 1080^2) ~= 2202.906
+    CANONICAL_REFERENCE_DIAGONAL: float = 2202.906
+
+    @property
+    def frame_dimensions(self) -> Tuple[float, float]:
+        """Return (width, height) from video metadata, detections, or canonical default."""
+        if self.video_metadata:
+            w = self.video_metadata.get("width")
+            h = self.video_metadata.get("height")
+            if w and h and float(w) > 0 and float(h) > 0:
+                return float(w), float(h)
+        for d in self.validated_detections:
+            w = d.get("image_width")
+            h = d.get("image_height")
+            if w and h and float(w) > 0 and float(h) > 0:
+                return float(w), float(h)
+        for t in self.tracks:
+            if t.current_bbox:
+                if t.current_bbox.x2 > 1920 or t.current_bbox.y2 > 1080:
+                    return 3840.0, 2160.0
+        return 1920.0, 1080.0
+
+    @property
+    def frame_diagonal(self) -> float:
+        w, h = self.frame_dimensions
+        return math.hypot(w, h)
+
+    @property
+    def resolution_scale_factor(self) -> float:
+        """Scale factor relative to canonical 1080p reference frame."""
+        diag = self.frame_diagonal
+        return (diag / self.CANONICAL_REFERENCE_DIAGONAL) if diag > 0 else 1.0
+
+    def normalize_distance(self, distance_pixels: float) -> float:
+        """Convert a pixel distance to normalized fraction of frame diagonal."""
+        diag = self.frame_diagonal
+        return float(distance_pixels) / diag if diag > 0 else 0.0
+
+    def denormalize_distance(self, normalized_fraction: float) -> float:
+        """Convert a normalized fraction of frame diagonal to current frame pixels."""
+        return float(normalized_fraction) * self.frame_diagonal

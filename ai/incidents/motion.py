@@ -36,10 +36,16 @@ class UniversalMotionEngine:
         self.stationary_speed_threshold = stationary_speed_threshold
         self.stationary_disp_threshold = stationary_disp_threshold
 
-    def compute_track_motion(self, track: TrackedObject) -> List[TrackMotion]:
+    def compute_track_motion(
+        self,
+        track: TrackedObject,
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
+    ) -> List[TrackMotion]:
         """
         Compute frame-by-frame TrackMotion telemetry along a track's trajectory.
         Trajectory format: [(timestamp, cx, cy), ...]
+        Applies resolution-normalized speed and displacement thresholds.
         """
         if not track or not track.trajectory:
             return []
@@ -48,6 +54,18 @@ class UniversalMotionEngine:
         n = len(trajectory)
         if n == 0:
             return []
+
+        # Resolution scale factor relative to 1080p canonical diagonal (2202.906)
+        CANONICAL_REF_DIAGONAL = 2202.906
+        if frame_width and frame_height and frame_width > 0 and frame_height > 0:
+            scale_factor = math.hypot(frame_width, frame_height) / CANONICAL_REF_DIAGONAL
+        elif track and track.current_bbox and (track.current_bbox.x2 > 1920 or track.current_bbox.y2 > 1080):
+            scale_factor = math.hypot(3840, 2160) / CANONICAL_REF_DIAGONAL
+        else:
+            scale_factor = 1.0
+
+        effective_speed_threshold = self.stationary_speed_threshold * scale_factor
+        effective_min_step = 2.0 * scale_factor
 
         motions: List[TrackMotion] = []
         origin_t, origin_x, origin_y = trajectory[0]
@@ -116,8 +134,8 @@ class UniversalMotionEngine:
             if not math.isfinite(speed_delta):
                 speed_delta = 0.0
 
-            # Stationary evaluation
-            is_stat = instant_velocity < self.stationary_speed_threshold or step_distance < 2.0
+            # Stationary evaluation with resolution-scaled thresholds
+            is_stat = instant_velocity < effective_speed_threshold or step_distance < effective_min_step
             if is_stat:
                 consecutive_stationary_sec += dt
                 consecutive_moving_sec = 0.0

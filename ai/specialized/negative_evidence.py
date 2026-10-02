@@ -84,6 +84,18 @@ class SpecializedNegativeEvidenceEngine:
                         )
                     )
 
+        # 4. Negative Evidence: Pedestrian Clothing / Personal Belonging Context
+        has_clothing_tag = any(m.get("is_person_clothing", False) for m in track.visual_metrics_history)
+        if has_clothing_tag:
+            contradictory.append(
+                SupportingSignal(
+                    signal_type="Negative: Person Clothing / Accessory Chromaticity",
+                    description="Visual chromaticity co-located with pedestrian clothing/accessories without thermal combustion.",
+                    confidence=0.92,
+                    timestamp=track.first_seen,
+                )
+            )
+
         return contradictory
 
     @classmethod

@@ -1,0 +1,16 @@
+.git
+.github
+frontend
+storage/uploads
+storage/evidence
+storage/evidence_playback
+storage/playback
+storage/events
+storage/reports
+.pytest_cache
+backend/.pytest_cache
+**/__pycache__
+**/*.pyc
+**/*.pyo
+scratch
+scratch/

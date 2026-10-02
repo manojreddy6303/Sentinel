@@ -209,6 +209,36 @@ class NegativeEvidenceEngine:
                     )
                 )
 
+        # 3. Negative Evidence: Transient Detection Drop (Unstable Object Track)
+        # If object track had only 1 observation and duration < 0.5s, its disappearance is a detector dropout, not physical theft
+        if object_track.detection_count <= 1 and object_track.duration_seconds < 0.5:
+            contradictory_signals.append(
+                SupportingSignal(
+                    signal_type="Negative: Transient Object Detection",
+                    description=(
+                        f"Object [{object_track.object_class} • {object_track.track_id}] was only observed in "
+                        f"{object_track.detection_count} frame ({object_track.duration_seconds:.2f}s); disappearance represents detector loss."
+                    ),
+                    confidence=0.90,
+                    timestamp=object_track.last_seen,
+                )
+            )
+
+        # 4. Negative Evidence: Object Lost Prior to Person Arrival
+        # If object track ceased before person even reached interaction proximity
+        if object_track.last_seen < interaction_end_time - 3.0:
+            contradictory_signals.append(
+                SupportingSignal(
+                    signal_type="Negative: Object Ceased Prior to Proximity",
+                    description=(
+                        f"Object [{object_track.object_class} • {object_track.track_id}] ceased detection "
+                        f"prior to person arrival (last seen at {object_track.last_seen:.1f}s vs interaction {interaction_end_time:.1f}s)."
+                    ),
+                    confidence=0.92,
+                    timestamp=object_track.last_seen,
+                )
+            )
+
         return contradictory_signals
 
     @classmethod
@@ -850,6 +880,8 @@ class NegativeEvidenceEngine:
         is_static_surface: bool = False,
         scene_context: Optional[Any] = None,
         is_roadway_lighting: bool = False,
+        is_person_clothing: bool = False,
+        has_smoke: bool = True,
         event_time: float = 0.0,
     ) -> List[SupportingSignal]:
         """Identify counter-evidence refuting a fire hypothesis."""
@@ -872,6 +904,26 @@ class NegativeEvidenceEngine:
                     signal_type="Negative: Static Surface Chromaticity",
                     description="Observed chromatic region shows negligible dynamic flicker; consistent with painted orange/red fixture.",
                     confidence=0.88,
+                    timestamp=event_time,
+                )
+            )
+
+        if is_person_clothing:
+            contradictory.append(
+                SupportingSignal(
+                    signal_type="Negative: Person Clothing / Accessory Chromaticity",
+                    description="Visual chromaticity co-located with pedestrian clothing/accessories without thermal combustion.",
+                    confidence=0.95,
+                    timestamp=event_time,
+                )
+            )
+
+        if not has_smoke:
+            contradictory.append(
+                SupportingSignal(
+                    signal_type="Negative: Absence of Smoke Plume",
+                    description="Indoor environment shows zero corresponding aerosol smoke plume.",
+                    confidence=0.82,
                     timestamp=event_time,
                 )
             )

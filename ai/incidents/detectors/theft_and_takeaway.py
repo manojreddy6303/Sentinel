@@ -116,9 +116,17 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
         target_classes = getattr(
             settings,
             "THEFT_TARGET_CLASSES",
-            {"backpack", "handbag", "suitcase", "laptop", "cell phone", "bottle", "umbrella", "bicycle", "box", "package"},
+            {
+                "backpack", "handbag", "suitcase", "laptop", "cell phone", "bottle",
+                "umbrella", "bicycle", "box", "package", "book", "cup", "vase",
+                "scissors", "teddy bear", "clock", "remote", "merchandise",
+            },
         )
         non_person_tracks = [t for t in context.tracks if t.object_class in target_classes]
+
+        scale_factor = getattr(context, "resolution_scale_factor", 1.0)
+        effective_interaction_dist = self.interaction_max_distance * scale_factor
+        effective_departure_dist = self.min_departure_distance * scale_factor
 
         for p_track in person_tracks:
             if not p_track.trajectory or len(p_track.trajectory) < 2:
@@ -130,12 +138,15 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
 
                 orig_o_cx, orig_o_cy = o_track.trajectory[0][1], o_track.trajectory[0][2]
 
-                # Check proximity
+                # Check proximity with resolution-scaled distance during object presence window
                 proximity_moments = []
                 for p_pt in p_track.trajectory:
                     p_t, p_cx, p_cy = p_pt[0], p_pt[1], p_pt[2]
+                    # Contemporaneous presence check: person can only interact with an object while it exists
+                    if not (o_track.first_seen - 1.0 <= p_t <= o_track.last_seen + 1.0):
+                        continue
                     dist_to_orig = math.hypot(p_cx - orig_o_cx, p_cy - orig_o_cy)
-                    if dist_to_orig <= self.interaction_max_distance:
+                    if dist_to_orig <= effective_interaction_dist:
                         proximity_moments.append((p_t, p_cx, p_cy))
 
                 if not proximity_moments:
@@ -145,10 +156,16 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                 interaction_end = max(m[0] for m in proximity_moments)
                 interaction_duration = round(interaction_end - interaction_start, 2)
 
-                if interaction_duration < self.min_interaction_seconds and len(proximity_moments) < 2:
+                # Check rapid takeaway / shoplifting condition (grab-and-go in single 1 FPS frame)
+                is_rapid_loss = (
+                    o_track.last_seen <= interaction_end + self.object_loss_window
+                    and p_track.last_seen > o_track.last_seen
+                )
+
+                if interaction_duration < self.min_interaction_seconds and len(proximity_moments) < 2 and not is_rapid_loss:
                     continue
 
-                # Departure condition
+                # Departure condition with resolution-scaled departure distance
                 subsequent_person_pts = [
                     pt for pt in p_track.trajectory
                     if pt[0] >= interaction_start + self.min_interaction_seconds or pt[0] >= interaction_end
@@ -161,8 +178,14 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                     for pt in subsequent_person_pts
                 )
 
-                if max_departure_disp < self.min_departure_distance:
+                if max_departure_disp < effective_departure_dist:
                     continue
+
+                # Require minimally stable object track to avoid flagging single-frame detector dropouts as theft,
+                # unless verified interaction dwell occurred during person proximity
+                if len(o_track.trajectory) < 2 and o_track.duration_seconds < 0.5:
+                    if len(proximity_moments) < 2 or interaction_duration < 1.0:
+                        continue
 
                 # Disappearance or co-movement
                 is_disappeared = (
@@ -176,7 +199,7 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                         math.hypot(pt[1] - orig_o_cx, pt[2] - orig_o_cy)
                         for pt in o_track.trajectory
                     )
-                    if o_max_disp >= self.min_departure_distance:
+                    if o_max_disp >= effective_departure_dist:
                         is_co_moving = True
 
                 if not (is_disappeared or is_co_moving):
@@ -224,8 +247,16 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                 neg_signals = NegativeEvidenceEngine.evaluate_theft_negative_evidence(
                     p_track, o_track, context, interaction_end
                 )
-                if any(s.signal_type in ("Negative: Object Remains Present", "Negative: Frame Boundary Exit") for s in neg_signals):
-                    # Object never moved and remained present after departure, or exited frame boundary -> non-theft
+                critical_negatives = [
+                    "Negative: Object Remains Present",
+                    "Negative: Frame Boundary Exit",
+                    "Negative: Object Ceased Prior to Proximity",
+                ]
+                if len(o_track.trajectory) < 2 and interaction_duration < 1.0:
+                    critical_negatives.append("Negative: Transient Object Detection")
+
+                if any(s.signal_type in critical_negatives for s in neg_signals):
+                    # Object never moved and remained present, or exited frame boundary, or was transient flicker, or ceased before arrival -> non-theft
                     continue
 
                 scoring = IncidentScorer.calculate_evidence_score(
@@ -234,6 +265,8 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                     tracks=[p_track, o_track],
                     duration_seconds=interaction_duration,
                     expected_duration_threshold=self.min_interaction_seconds,
+                    contradictory_signals=neg_signals,
+                    incident_type="POTENTIAL_THEFT",
                 )
 
                 spatial_ctx = SpatialContext(

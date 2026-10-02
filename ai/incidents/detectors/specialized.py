@@ -136,11 +136,34 @@ class SpecializedFireIncidentDetector(BaseIncidentDetector):
                 mean_area_cv = ep_meta.get("mean_area_cv", 1.0)
                 is_static_surface = mean_area_cv < 0.04
 
+                # Check if flame episode overlaps a pedestrian's body/clothing
+                is_person_clothing = False
+                if ep.bounding_box:
+                    ecx = (ep.bounding_box.x1 + ep.bounding_box.x2) / 2.0
+                    ecy = (ep.bounding_box.y1 + ep.bounding_box.y2) / 2.0
+                    for ptrk in (context.tracks or []):
+                        if ptrk.object_class == "person" and ptrk.current_bbox:
+                            pb = ptrk.current_bbox
+                            if pb.x1 <= ecx <= pb.x2 and pb.y1 <= ecy <= pb.y2:
+                                is_person_clothing = True
+                                break
+
+                # Check if aerosol smoke plume exists anywhere in the scene
+                has_smoke = any(
+                    getattr(t, "class_name", "") == "smoke"
+                    for t in (context.specialized_tracks or [])
+                ) or any(
+                    getattr(ep_s, "class_name", "") == "smoke"
+                    for ep_s in (context.specialized_episodes or [])
+                )
+
                 contradictory = NegativeEvidenceEngine.evaluate_fire_negative_evidence(
                     observation_count=obs_cnt,
                     persistence_duration=duration,
                     is_static_surface=is_static_surface,
                     scene_context=context.scene_context,
+                    is_person_clothing=is_person_clothing,
+                    has_smoke=has_smoke,
                     event_time=ep.start_time,
                 )
 
@@ -265,11 +288,31 @@ class SpecializedFireIncidentDetector(BaseIncidentDetector):
                 area_cv = _math.sqrt(area_var) / mean_a
             is_static_surface = area_cv < 0.04
 
+            # Check if flame track overlaps pedestrian body/clothing
+            is_person_clothing = False
+            if trk.bounding_boxes:
+                last_bb = trk.bounding_boxes[-1]
+                tcx = (float(last_bb.get("x1", 0.0)) + float(last_bb.get("x2", 0.0))) / 2.0
+                tcy = (float(last_bb.get("y1", 0.0)) + float(last_bb.get("y2", 0.0))) / 2.0
+                for ptrk in (context.tracks or []):
+                    if ptrk.object_class == "person" and ptrk.current_bbox:
+                        pb = ptrk.current_bbox
+                        if pb.x1 <= tcx <= pb.x2 and pb.y1 <= tcy <= pb.y2:
+                            is_person_clothing = True
+                            break
+
+            has_smoke = any(
+                getattr(t, "class_name", "") == "smoke"
+                for t in (context.specialized_tracks or [])
+            )
+
             contradictory = NegativeEvidenceEngine.evaluate_fire_negative_evidence(
                 observation_count=obs_cnt,
                 persistence_duration=duration,
                 is_static_surface=is_static_surface,
                 scene_context=context.scene_context,
+                is_person_clothing=is_person_clothing,
+                has_smoke=has_smoke,
                 event_time=trk.first_seen,
             )
 

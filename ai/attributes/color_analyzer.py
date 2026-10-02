@@ -1,26 +1,30 @@
 """
-Vehicle Color Analysis Module for Sentinel Surveillance Intelligence
+Universal Robust Color Analysis Module for Sentinel Surveillance Intelligence (Phase 20.2)
 
-Performs visual color analysis on cropped vehicle bounding boxes using HSV color-space
-segmentation and dominant color classification over a controlled security vocabulary.
+Provides illumination-resilient, region-aware visual color extraction and temporal
+aggregation across anonymous track histories.
 
-CONTROLLED VOCABULARY:
-['black', 'white', 'grey', 'silver', 'red', 'blue', 'green', 'yellow', 'orange', 'brown', 'other', 'unknown']
-
-SAFETY CONSTRAINT:
-Never guess vehicle color. If pixel confidence is below threshold, classifies as 'unknown'.
-Gemini must never invent colors. Colors are derived solely from actual pixel data.
+SAFETY & PRIVACY CONSTRAINTS:
+1. Non-biometric: Color analysis applies to vehicle bodies, apparel, and portable objects only.
+2. Strict honesty: Low-illumination, underexposed, or monochromatic IR scenes yield "uncertain",
+   never inventing colors or guessing dark/black/grey due to poor lighting.
+3. Temporal stability: Single-frame glitches, specular reflections, or shadows cannot
+   overwrite an established, multi-frame track color.
 """
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
+import logging
 import cv2
 import numpy as np
 
-from ai.schemas import BoundingBox, VehicleAttribute
+from ai.schemas import BoundingBox, VehicleAttribute, ClothingColor
+from ai.common.numeric import clamp_finite, ensure_finite
+
+logger = logging.getLogger(__name__)
 
 
-class VehicleColorAnalyzer:
+class RobustColorExtractor:
     """
-    Extracts and classifies dominant vehicle body colors from image crops.
+    Stateless, illumination-aware color extractor operating on calibrated ROIs.
     """
 
     COLOR_VOCABULARY = [
@@ -36,10 +40,359 @@ class VehicleColorAnalyzer:
         "brown",
         "other",
         "unknown",
+        "uncertain",
     ]
+
+    CHROMATIC_FAMILIES = ["blue", "red", "orange", "yellow", "green", "brown"]
+
+    MIN_LUMINANCE_THRESHOLD = 30.0
+    MIN_SATURATION_THRESHOLD = 15.0
+
+    @classmethod
+    def extract_dominant_color(
+        cls,
+        roi_bgr: np.ndarray,
+        filter_skin: bool = False,
+        scene_is_ir: bool = False,
+    ) -> Tuple[str, float, bool]:
+        """Convenience method returning (dominant_color, confidence, is_illumination_uncertain)."""
+        res = cls.extract_from_roi(roi_bgr, filter_skin=filter_skin, scene_is_ir=scene_is_ir)
+        return res["dominant_color"], res["dominant_confidence"], res["is_illumination_uncertain"]
+
+    @classmethod
+    def extract_from_roi(
+        cls,
+        roi_bgr: np.ndarray,
+        filter_skin: bool = False,
+        scene_is_ir: bool = False,
+        scene_is_underexposed: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """
+        Extract dominant color from a pre-cropped Region of Interest (ROI).
+
+        Returns:
+            Dict containing dominant_color, confidence, secondary_color, etc.
+        """
+        if roi_bgr is None or roi_bgr.size == 0:
+            return {
+                "dominant_color": "unknown",
+                "dominant_confidence": 0.0,
+                "secondary_color": None,
+                "secondary_confidence": 0.0,
+                "is_illumination_uncertain": False,
+                "mean_luminance": 0.0,
+                "mean_saturation": 0.0,
+                "color_counts": {},
+                "total_pixels": 0,
+            }
+
+        rh, rw = roi_bgr.shape[:2]
+        if rh < 6 or rw < 6:
+            return {
+                "dominant_color": "unknown",
+                "dominant_confidence": 0.0,
+                "secondary_color": None,
+                "secondary_confidence": 0.0,
+                "is_illumination_uncertain": False,
+                "mean_luminance": 0.0,
+                "mean_saturation": 0.0,
+                "color_counts": {},
+                "total_pixels": rh * rw,
+            }
+
+        # Convert to HSV color space
+        hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+
+        mean_lum = float(np.mean(v))
+        mean_sat = float(np.mean(s))
+
+        # Check for illumination deficiency or monochromatic IR vision
+        is_white_achromatic = (mean_lum >= 180.0 and mean_sat < 35.0)
+
+        # Monochromatic IR or low illumination check (Step 4):
+        # If scene is declared IR, reject color extraction.
+        # If crop is dark (mean_lum < 30), mark uncertain unless daytime scene context confirms a black object.
+        # If crop is desaturated (mean_sat < 15) and not white, mark uncertain.
+        is_deficient = False
+        reason = ""
+        if scene_is_ir:
+            is_deficient = True
+            reason = "Scene classified as monochromatic IR"
+        elif mean_lum < cls.MIN_LUMINANCE_THRESHOLD:
+            if scene_is_underexposed is not False:
+                is_deficient = True
+                reason = "Crop mean luminance < 30 (underexposed)"
+        elif mean_sat < cls.MIN_SATURATION_THRESHOLD and not is_white_achromatic:
+            if scene_is_ir or scene_is_underexposed is not False:
+                is_deficient = True
+                reason = "Crop mean saturation < 15 (monochromatic)"
+
+        if is_deficient:
+            return {
+                "dominant_color": "uncertain",
+                "dominant_confidence": 0.30,
+                "secondary_color": None,
+                "secondary_confidence": 0.0,
+                "is_illumination_uncertain": True,
+                "mean_luminance": round(mean_lum, 2),
+                "mean_saturation": round(mean_sat, 2),
+                "color_counts": {},
+                "total_pixels": rh * rw,
+                "reason": reason,
+            }
+
+        # Optional skin-tone mask exclusion for neck/chest/face margins
+        valid_mask = np.ones((rh, rw), dtype=bool)
+        if filter_skin:
+            skin_h = ((h <= 24) | (h >= 168))
+            skin_s = (s >= 25) & (s <= 175)
+            skin_v = (v >= 45)
+            skin_mask = skin_h & skin_s & skin_v
+            # Only filter skin if it leaves at least 30% of pixels
+            non_skin_count = np.count_nonzero(~skin_mask)
+            if non_skin_count >= 0.30 * (rh * rw):
+                valid_mask = ~skin_mask
+
+        total_valid = int(np.count_nonzero(valid_mask))
+        if total_valid < 16:
+            return {
+                "dominant_color": "unknown",
+                "dominant_confidence": 0.0,
+                "secondary_color": None,
+                "secondary_confidence": 0.0,
+                "is_illumination_uncertain": False,
+                "mean_luminance": round(mean_lum, 2),
+                "mean_saturation": round(mean_sat, 2),
+                "color_counts": {},
+                "total_pixels": total_valid,
+            }
+
+        counts: Dict[str, int] = {
+            c: 0 for c in cls.COLOR_VOCABULARY if c not in ["unknown", "other", "uncertain"]
+        }
+
+        # 1. Achromatic: Black (V < 45, S < 85)
+        black_mask = valid_mask & (v < 45) & (s < 85)
+        counts["black"] = int(np.count_nonzero(black_mask))
+
+        # 2. Achromatic: White (S < 30 and V > 185)
+        white_mask = valid_mask & (s < 30) & (v > 185)
+        counts["white"] = int(np.count_nonzero(white_mask))
+
+        # 3. Achromatic: Grey / Silver (S < 35 and 45 <= V <= 185)
+        grey_base = valid_mask & (s < 35) & (v >= 45) & (v <= 185)
+        silver_mask = grey_base & (s < 25) & (v >= 140)
+        counts["silver"] = int(np.count_nonzero(silver_mask))
+        counts["grey"] = int(np.count_nonzero(grey_base & ~silver_mask))
+
+        # Chromatic mask (S >= 40 and V >= 45 and not black/white/grey)
+        achromatic_combined = black_mask | white_mask | grey_base
+        chromatic = valid_mask & ~achromatic_combined & (s >= 38) & (v >= 45)
+
+        # Red: H in [0, 10] or [165, 180]
+        red_mask = chromatic & ((h <= 10) | (h >= 165))
+        counts["red"] = int(np.count_nonzero(red_mask))
+
+        # Orange: H in (10, 24] and V >= 60
+        orange_mask = chromatic & (h > 10) & (h <= 24) & (v >= 60)
+        counts["orange"] = int(np.count_nonzero(orange_mask))
+
+        # Brown: H in (10, 24] and 40 <= V < 120 and S >= 38
+        brown_mask = chromatic & (h > 10) & (h <= 24) & (v >= 40) & (v < 120) & ~orange_mask
+        counts["brown"] = int(np.count_nonzero(brown_mask))
+
+        # Yellow: H in (24, 38]
+        yellow_mask = chromatic & (h > 24) & (h <= 38)
+        counts["yellow"] = int(np.count_nonzero(yellow_mask))
+
+        # Green: H in (38, 85]
+        green_mask = chromatic & (h > 38) & (h <= 85)
+        counts["green"] = int(np.count_nonzero(green_mask))
+
+        # Blue: H in (85, 135]
+        blue_mask = chromatic & (h > 85) & (h <= 135)
+        counts["blue"] = int(np.count_nonzero(blue_mask))
+
+        # Sort counts descending
+        sorted_counts = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        top_color, top_cnt = sorted_counts[0]
+        second_color, second_cnt = sorted_counts[1] if len(sorted_counts) > 1 else (None, 0)
+
+        # Check chromatic prominence: if a chromatic color represents >= 18% of valid pixels,
+        # it frequently identifies distinctive apparel or vehicle trim over neutral background
+        chrom_counts = [(c, counts[c]) for c in cls.CHROMATIC_FAMILIES if counts[c] > 0]
+        if chrom_counts:
+            best_chrom_color, best_chrom_cnt = max(chrom_counts, key=lambda kv: kv[1])
+            chrom_ratio = best_chrom_cnt / float(total_valid)
+            if chrom_ratio >= 0.18 and top_color in ["grey", "silver", "black"] and (top_cnt / float(total_valid)) < 0.65:
+                # Promote chromatic color over neutral background/shadow
+                second_color, second_cnt = top_color, top_cnt
+                top_color, top_cnt = best_chrom_color, best_chrom_cnt
+
+        dominant_ratio = top_cnt / float(total_valid)
+        secondary_ratio = second_cnt / float(total_valid) if second_cnt > 0 else 0.0
+
+        if dominant_ratio < 0.16 or top_cnt == 0:
+            final_dominant = "unknown"
+            final_conf = 0.20
+        else:
+            final_dominant = top_color
+            final_conf = min(0.98, max(0.35, dominant_ratio))
+
+        final_secondary = second_color if secondary_ratio >= 0.15 else None
+        final_sec_conf = min(0.95, secondary_ratio) if final_secondary else None
+
+        return {
+            "dominant_color": final_dominant,
+            "dominant_confidence": round(final_conf, 4),
+            "secondary_color": final_secondary,
+            "secondary_confidence": round(final_sec_conf, 4) if final_sec_conf is not None else None,
+            "is_illumination_uncertain": False,
+            "mean_luminance": round(mean_lum, 2),
+            "mean_saturation": round(mean_sat, 2),
+            "color_counts": {k: v for k, v in counts.items() if v > 0},
+            "total_pixels": total_valid,
+        }
+
+
+class TemporalColorFilter:
+    """
+    Maintains and smooths color attributes across multi-frame anonymous tracks.
+    Eliminates frame-to-frame color flipping and prevents isolated shadows/glare
+    from corrupting an established track color.
+    """
+
+    def __init__(self, history_window: int = 12):
+        self.history_window = max(2, int(history_window))
+        # track_id -> list of (timestamp, color, confidence, is_uncertain)
+        self._track_history: Dict[str, List[Tuple[float, str, float, bool]]] = {}
+
+    def reset(self, video_id: str = "") -> None:
+        """Clear color histories across video transitions."""
+        self._track_history.clear()
+
+    def update_track_color(
+        self,
+        track_id: str,
+        color: str,
+        confidence: float,
+        timestamp: float,
+        is_illumination_uncertain: bool = False,
+    ) -> Tuple[str, float, int, bool]:
+        """
+        Record observation and return consensus smoothed color attribute.
+
+        Returns:
+            Tuple of (stable_color, smoothed_confidence, observation_count, is_uncertain)
+        """
+        if not track_id:
+            return color, confidence, 1, is_illumination_uncertain
+
+        if track_id not in self._track_history:
+            self._track_history[track_id] = []
+
+        history = self._track_history[track_id]
+
+        # Record this observation
+        history.append((timestamp, color, confidence, is_illumination_uncertain))
+        if len(history) > self.history_window:
+            history.pop(0)
+
+        # Check existing confirmed history
+        valid_obs = [obs for obs in history if not obs[3] and obs[1] not in ("unknown", "uncertain")]
+
+        if not valid_obs:
+            # All observations uncertain or unknown
+            return "uncertain" if is_illumination_uncertain else "unknown", confidence, len(history), is_illumination_uncertain
+
+        # If incoming observation is uncertain or unknown, preserve confirmed history
+        if (is_illumination_uncertain or color in ("unknown", "uncertain")) and valid_obs:
+            # Do NOT allow single bad frame to overwrite established track color
+            best_past_color, best_past_conf = max(
+                [(obs[1], obs[2]) for obs in valid_obs], key=lambda x: x[1]
+            )
+            return best_past_color, round(best_past_conf * 0.90, 4), len(history), False
+
+        # Accumulate confidence-weighted votes across valid history
+        color_weights: Dict[str, float] = {}
+        color_counts: Dict[str, int] = {}
+        for _, c, conf, _ in valid_obs:
+            color_weights[c] = color_weights.get(c, 0.0) + conf
+            color_counts[c] = color_counts.get(c, 0) + 1
+
+        total_weight = sum(color_weights.values())
+        top_color, top_weight = max(color_weights.items(), key=lambda kv: kv[1])
+        top_count = color_counts[top_color]
+        agreement_ratio = top_weight / total_weight if total_weight > 0 else 0.0
+
+        # Consensus conditions
+        if len(valid_obs) == 1:
+            # Single observation: tentative
+            return top_color, round(confidence * 0.85, 4), 1, False
+
+        if agreement_ratio >= 0.55 and top_count >= 2:
+            # Confirmed stable attribute
+            smoothed_conf = min(0.98, max(0.50, agreement_ratio * 0.95))
+            return top_color, round(smoothed_conf, 4), len(valid_obs), False
+        elif agreement_ratio >= 0.45:
+            # Mild consensus
+            return top_color, round(confidence * 0.70, 4), len(valid_obs), False
+        else:
+            # High color variance across frames -> uncertain
+            return "uncertain", 0.40, len(valid_obs), False
+
+    def update(
+        self,
+        track_id: str,
+        color: str,
+        confidence: float,
+        timestamp: float,
+        is_illumination_uncertain: bool = False,
+    ) -> Tuple[str, float, bool]:
+        """Convenience method returning (stable_color, confidence, is_confirmed)."""
+        col, conf, count, is_unc = self.update_track_color(
+            track_id=track_id,
+            color=color,
+            confidence=confidence,
+            timestamp=timestamp,
+            is_illumination_uncertain=is_illumination_uncertain,
+        )
+        is_confirmed = (count >= 3 and not is_unc and conf >= 0.60)
+        return col, conf, is_confirmed
+
+    def get_stable_color(self, track_id: str) -> Tuple[str, float, bool]:
+        """Query current consensus color for track."""
+        history = self._track_history.get(track_id, [])
+        if not history:
+            return "unknown", 0.0, False
+        last_obs = history[-1]
+        col, conf, count, is_unc = self.update_track_color(
+            track_id=track_id,
+            color=last_obs[1],
+            confidence=last_obs[2],
+            timestamp=last_obs[0],
+            is_illumination_uncertain=last_obs[3],
+        )
+        is_confirmed = (count >= 3 and not is_unc and conf >= 0.60)
+        return col, conf, is_confirmed
+
+
+class VehicleColorAnalyzer:
+    """
+    Extracts and classifies dominant vehicle body colors from image crops with
+    region-aware core masking and temporal track voting.
+    """
+
+    COLOR_VOCABULARY = RobustColorExtractor.COLOR_VOCABULARY
 
     def __init__(self, min_confidence_threshold: float = 0.40):
         self.min_confidence_threshold = min_confidence_threshold
+        self.temporal_filter = TemporalColorFilter()
+
+    def reset(self, video_id: str = "") -> None:
+        """Reset temporal state between videos."""
+        self.temporal_filter.reset(video_id)
 
     def analyze(
         self,
@@ -48,13 +401,22 @@ class VehicleColorAnalyzer:
         timestamp: float,
         object_class: str = "car",
         track_id: Optional[str] = None,
+        scene_report: Optional[Any] = None,
     ) -> VehicleAttribute:
         """
-        Analyze vehicle crop from a BGR image frame and classify dominant color.
+        Analyze vehicle crop from a BGR image frame and classify dominant and secondary color.
         """
-        h_frame, w_frame = frame_bgr.shape[:2]
+        if frame_bgr is None or frame_bgr.size == 0:
+            return VehicleAttribute(
+                color="unknown",
+                confidence=0.0,
+                timestamp=timestamp,
+                bounding_box=bbox,
+                object_class=object_class,
+                track_id=track_id,
+            )
 
-        # Clamp bounding box to frame boundaries
+        h_frame, w_frame = frame_bgr.shape[:2]
         x1 = max(0, min(int(bbox.x1), w_frame - 1))
         y1 = max(0, min(int(bbox.y1), h_frame - 1))
         x2 = max(x1 + 1, min(int(bbox.x2), w_frame))
@@ -63,7 +425,6 @@ class VehicleColorAnalyzer:
         crop = frame_bgr[y1:y2, x1:x2]
         ch, cw = crop.shape[:2]
 
-        # If crop is too tiny to analyze meaningfully (< 12x12 px)
         if ch < 12 or cw < 12:
             return VehicleAttribute(
                 color="unknown",
@@ -75,124 +436,84 @@ class VehicleColorAnalyzer:
                 color_space_metrics={"error": "Crop too small for color analysis"},
             )
 
-        # Focus on object core: upper-body torso for persons, body core for vehicles
-        if object_class == "person":
-            # For persons: focus on upper-body torso / clothing (avoiding head/hair and lower legs/floor)
-            cy1 = int(ch * 0.15)
-            cy2 = int(ch * 0.58)
-            cx1 = int(cw * 0.15)
-            cx2 = int(cw * 0.85)
-        else:
-            # Vehicle body core (avoiding top roof/sky and bottom tires/asphalt)
-            cy1 = int(ch * 0.20)
-            cy2 = int(ch * 0.85)
-            cx1 = int(cw * 0.15)
-            cx2 = int(cw * 0.85)
-        body_crop = crop[cy1:cy2, cx1:cx2]
+        # Vehicle body core: 22%–80% height, 15%–85% width
+        # Eliminates windshield/roof reflection and bottom wheels/tires/asphalt
+        cy1 = int(ch * 0.22)
+        cy2 = int(ch * 0.80)
+        cx1 = int(cw * 0.15)
+        cx2 = int(cw * 0.85)
 
-        if body_crop.size == 0:
-            body_crop = crop
+        core_crop = crop[cy1:cy2, cx1:cx2]
+        if core_crop.size == 0:
+            core_crop = crop
 
-        # Convert to HSV color space
-        hsv = cv2.cvtColor(body_crop, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(hsv)
-
-        total_pixels = body_crop.shape[0] * body_crop.shape[1]
-        if total_pixels == 0:
-            return VehicleAttribute(
-                color="unknown",
-                confidence=0.0,
-                timestamp=timestamp,
-                bounding_box=bbox,
-                object_class=object_class,
-                track_id=track_id,
-            )
-
-        # Count pixels matching each color family
-        counts: Dict[str, int] = {c: 0 for c in self.COLOR_VOCABULARY if c not in ["unknown", "other"]}
-
-        # 1. Achromatic: Black (V < 50)
-        black_mask = (v < 50)
-        counts["black"] = int(np.count_nonzero(black_mask))
-
-        # 2. Achromatic: White (S < 35 and V > 185)
-        white_mask = (s < 35) & (v > 185)
-        counts["white"] = int(np.count_nonzero(white_mask))
-
-        # 3. Achromatic: Grey / Silver (S < 45 and 50 <= V <= 185)
-        grey_mask = (s < 45) & (v >= 50) & (v <= 185)
-        silver_mask = (s < 30) & (v >= 140) & (v <= 185)
-        counts["silver"] = int(np.count_nonzero(silver_mask))
-        counts["grey"] = int(np.count_nonzero(grey_mask & ~silver_mask))
-
-        # Chromatic pixels (S >= 40 and V >= 50)
-        chromatic = (s >= 40) & (v >= 50)
-
-        # Red: H in [0, 10] or [165, 180]
-        red_mask = chromatic & ((h <= 10) | (h >= 165))
-        counts["red"] = int(np.count_nonzero(red_mask))
-
-        # Orange: H in (10, 25]
-        orange_mask = chromatic & (h > 10) & (h <= 25)
-        counts["orange"] = int(np.count_nonzero(orange_mask))
-
-        # Yellow: H in (25, 38]
-        yellow_mask = chromatic & (h > 25) & (h <= 38)
-        counts["yellow"] = int(np.count_nonzero(yellow_mask))
-
-        # Green: H in (38, 85]
-        green_mask = chromatic & (h > 38) & (h <= 85)
-        counts["green"] = int(np.count_nonzero(green_mask))
-
-        # Blue: H in (85, 135]
-        blue_mask = chromatic & (h > 85) & (h <= 135)
-        counts["blue"] = int(np.count_nonzero(blue_mask))
-
-        # Brown: H in (10, 25], lower V (40 <= V < 110), moderate S
-        brown_mask = (h > 10) & (h <= 25) & (v >= 40) & (v < 110) & (s >= 40)
-        counts["brown"] = int(np.count_nonzero(brown_mask))
-
-        # Determine dominant color
-        if object_class == "person":
-            # For person clothing: if a chromatic color (blue, red, orange, yellow, green, brown)
-            # is distinctively present (>= 18% of torso pixels), it reflects the person's distinctive clothing
-            chromatic_families = ["blue", "red", "orange", "yellow", "green", "brown"]
-            best_chrom_color, best_chrom_count = max(
-                [(c, counts[c]) for c in chromatic_families],
-                key=lambda item: item[1],
-            )
-            chrom_ratio = float(best_chrom_count) / float(total_pixels)
-            if chrom_ratio >= 0.18:
-                best_color = best_chrom_color
-                best_count = best_chrom_count
-                confidence = chrom_ratio
+        is_ir = False
+        if scene_report is not None:
+            ill_type = getattr(scene_report, "illumination_type", None)
+            if ill_type and hasattr(ill_type, "value"):
+                ill_val = ill_type.value
             else:
-                best_color, best_count = max(counts.items(), key=lambda item: item[1])
-                confidence = float(best_count) / float(total_pixels)
-        else:
-            best_color, best_count = max(counts.items(), key=lambda item: item[1])
-            confidence = float(best_count) / float(total_pixels)
+                ill_val = str(ill_type or "")
+            if "night_ir" in ill_val:
+                is_ir = True
 
-        # If highest confidence is below threshold, label as unknown
-        effective_min_thresh = 0.18 if object_class == "person" else self.min_confidence_threshold
-        if confidence < effective_min_thresh or best_count == 0:
-            final_color = "unknown"
-            final_conf = max(0.1, round(confidence, 3))
+        frame_mean_lum = float(np.mean(frame_bgr))
+        scene_underexposed = (frame_mean_lum < 30.0)
+
+        raw_metrics = RobustColorExtractor.extract_from_roi(
+            core_crop,
+            filter_skin=False,
+            scene_is_ir=is_ir,
+            scene_is_underexposed=scene_underexposed,
+        )
+
+        raw_color = raw_metrics["dominant_color"]
+        raw_conf = raw_metrics["dominant_confidence"]
+        is_illum_unc = raw_metrics.get("is_illumination_uncertain", False)
+
+        # Temporal aggregation over anonymous track ID
+        if track_id:
+            stable_color, stable_conf, obs_cnt, is_unc = self.temporal_filter.update_track_color(
+                track_id=track_id,
+                color=raw_color,
+                confidence=raw_conf,
+                timestamp=timestamp,
+                is_illumination_uncertain=is_illum_unc,
+            )
+            final_color = stable_color
+            final_conf = stable_conf
+            final_is_unc = is_unc
         else:
-            final_color = best_color
-            final_conf = min(0.99, round(confidence, 3))
+            final_color = raw_color
+            final_conf = raw_conf
+            final_is_unc = is_illum_unc
+
+        # Approximate orientation from bounding box aspect ratio
+        aspect = float(cw) / float(max(1, ch))
+        if aspect > 1.6:
+            orient = "side_profile"
+        elif aspect < 0.9:
+            orient = "front_or_rear"
+        else:
+            orient = "angled"
 
         return VehicleAttribute(
             color=final_color,
-            confidence=final_conf,
+            confidence=round(final_conf, 4),
+            secondary_color=raw_metrics.get("secondary_color"),
+            secondary_confidence=raw_metrics.get("secondary_confidence"),
+            approximate_orientation=orient,
+            is_occluded=False,
+            is_illumination_uncertain=final_is_unc,
             timestamp=timestamp,
             bounding_box=bbox,
             object_class=object_class,
             track_id=track_id,
             color_space_metrics={
-                "dominant_ratio": round(confidence, 3),
-                "counts": {k: v for k, v in counts.items() if v > 0},
-                "mean_v": round(float(np.mean(v)), 1),
-                "mean_s": round(float(np.mean(s)), 1),
+                "dominant_ratio": raw_metrics.get("dominant_confidence"),
+                "counts": raw_metrics.get("color_counts", {}),
+                "mean_v": raw_metrics.get("mean_luminance"),
+                "mean_s": raw_metrics.get("mean_saturation"),
+                "temporal_samples": obs_cnt if track_id else 1,
             },
         )

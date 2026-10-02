@@ -207,6 +207,8 @@ class TrackedObject:
     color_confidence: Optional[float] = None
     state: TrackLifecycleState = TrackLifecycleState.TENTATIVE
     video_id: str = ""
+    visual_attributes: Optional[Dict[str, Any]] = None
+    attribute_history: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
         self.first_seen = ensure_finite(self.first_seen, 0.0)
@@ -255,6 +257,147 @@ class TrackedObject:
             "is_validated": self.is_validated,
             "color": self.color,
             "color_confidence": round(self.color_confidence, 4) if self.color_confidence is not None else None,
+            "visual_attributes": self.visual_attributes,
+            "attribute_history": self.attribute_history,
+        }
+
+
+@dataclass
+class ClothingColor:
+    """Non-biometric clothing color attribute with illumination and temporal confidence."""
+    color_name: str
+    confidence: float
+    observation_count: int = 1
+    is_illumination_uncertain: bool = False
+    region: str = "upper"  # upper, lower, outerwear, carried_object
+    color_space_metrics: Optional[Dict[str, Any]] = None
+
+    @property
+    def color(self) -> str:
+        return self.color_name
+
+    @property
+    def is_confirmed(self) -> bool:
+        return self.observation_count >= 3 and not self.is_illumination_uncertain and self.confidence >= 0.60
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "color_name": self.color_name,
+            "color": self.color_name,
+            "confidence": round(ensure_finite(self.confidence, 0.0), 4),
+            "observation_count": self.observation_count,
+            "is_confirmed": self.is_confirmed,
+            "is_illumination_uncertain": self.is_illumination_uncertain,
+            "region": self.region,
+            "color_space_metrics": self.color_space_metrics or {},
+        }
+
+
+@dataclass
+class FaceRegionTelemetry:
+    """
+    CRITICAL NON-BIOMETRIC PRIVACY BOUNDARY:
+    Localizes face region coordinates and optical properties only.
+    Contains ABSOLUTELY ZERO identity tokens, facial recognition embeddings,
+    database lookup references, or biometric profiles.
+    """
+    face_present: bool
+    visibility_score: float = 0.0
+    quality_score: float = 0.0
+    approximate_orientation: str = "unknown"  # frontal, profile_left, profile_right, downward, unknown
+    is_occluded: bool = False
+    sharpness_score: float = 0.0
+    resolution: Tuple[int, int] = (0, 0)
+    face_bbox: Optional[BoundingBox] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "face_present": self.face_present,
+            "visibility_score": round(ensure_finite(self.visibility_score, 0.0), 4),
+            "quality_score": round(ensure_finite(self.quality_score, 0.0), 4),
+            "approximate_orientation": self.approximate_orientation,
+            "is_occluded": self.is_occluded,
+            "sharpness_score": round(ensure_finite(self.sharpness_score, 0.0), 2),
+            "resolution": list(self.resolution),
+            "face_bbox": self.face_bbox.to_dict() if self.face_bbox else None,
+        }
+
+
+@dataclass
+class PersonVisualAttributes:
+    """Universal non-biometric visual attributes for a tracked person."""
+    track_id: str
+    timestamp: float
+    bounding_box: BoundingBox
+    upper_clothing_color: ClothingColor
+    lower_clothing_color: Optional[ClothingColor] = None
+    outerwear_color: Optional[ClothingColor] = None
+    carried_object_category: Optional[str] = None
+    carried_object_color: Optional[str] = None
+    headwear: Optional[str] = None
+    face_telemetry: Optional[FaceRegionTelemetry] = None
+    occlusion_level: float = 0.0
+    posture: str = "standing"  # standing, walking, sitting, bending, unknown
+
+    @property
+    def upper_clothing(self) -> ClothingColor:
+        return self.upper_clothing_color
+
+    @property
+    def lower_clothing(self) -> Optional[ClothingColor]:
+        return self.lower_clothing_color
+
+    @property
+    def outerwear(self) -> Optional[ClothingColor]:
+        return self.outerwear_color
+
+    @property
+    def headwear_present(self) -> bool:
+        return self.headwear is not None and self.headwear != "none"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "track_id": self.track_id,
+            "timestamp": round(ensure_finite(self.timestamp, 0.0), 4),
+            "bounding_box": self.bounding_box.to_dict(),
+            "upper_clothing_color": self.upper_clothing_color.to_dict() if self.upper_clothing_color else None,
+            "lower_clothing_color": self.lower_clothing_color.to_dict() if self.lower_clothing_color else None,
+            "outerwear_color": self.outerwear_color.to_dict() if self.outerwear_color else None,
+            "carried_object_category": self.carried_object_category,
+            "carried_object_color": self.carried_object_color,
+            "headwear": self.headwear,
+            "face_telemetry": self.face_telemetry.to_dict() if self.face_telemetry else None,
+            "occlusion_level": round(ensure_finite(self.occlusion_level, 0.0), 4),
+            "posture": self.posture,
+        }
+
+
+@dataclass
+class GeneralObjectAttributes:
+    """Universal physical attributes for detected surveillance items."""
+    object_class: str
+    color: str = "unknown"
+    confidence: float = 0.0
+    size: Tuple[float, float] = (0.0, 0.0)
+    position: Tuple[float, float] = (0.0, 0.0)
+    persistence_seconds: float = 0.0
+    interaction_state: str = "stationary"  # stationary, carried, in_motion
+    track_id: Optional[str] = None
+    timestamp: float = 0.0
+    bounding_box: Optional[BoundingBox] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "object_class": self.object_class,
+            "color": self.color,
+            "confidence": round(ensure_finite(self.confidence, 0.0), 4),
+            "size": list(self.size),
+            "position": list(self.position),
+            "persistence_seconds": round(ensure_finite(self.persistence_seconds, 0.0), 4),
+            "interaction_state": self.interaction_state,
+            "track_id": self.track_id,
+            "timestamp": round(ensure_finite(self.timestamp, 0.0), 4),
+            "bounding_box": self.bounding_box.to_dict() if self.bounding_box else None,
         }
 
 
@@ -267,11 +410,21 @@ class VehicleAttribute:
     object_class: str = "car"
     track_id: Optional[str] = None
     color_space_metrics: Optional[Dict[str, Any]] = None
+    secondary_color: Optional[str] = None
+    secondary_confidence: Optional[float] = None
+    approximate_orientation: str = "unknown"
+    is_occluded: bool = False
+    is_illumination_uncertain: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "color": self.color,
             "confidence": round(self.confidence, 4),
+            "secondary_color": self.secondary_color,
+            "secondary_confidence": round(self.secondary_confidence, 4) if self.secondary_confidence is not None else None,
+            "approximate_orientation": self.approximate_orientation,
+            "is_occluded": self.is_occluded,
+            "is_illumination_uncertain": self.is_illumination_uncertain,
             "timestamp": round(self.timestamp, 4),
             "bounding_box": self.bounding_box.to_dict(),
             "object_class": self.object_class,

@@ -186,6 +186,20 @@ class SpecializedValidationEngine:
             obs.validation_reason = "Static solid-color reflective surface (uniform luminance, high circularity)"
             return obs
 
+        # Pedestrian clothing / accessory rejection
+        if metrics.get("is_person_clothing", False):
+            obs.validation_status = SpecializedValidationStatus.REJECTED
+            obs.validation_reason = "Chromaticity co-located with pedestrian clothing/accessory without flame turbulence"
+            return obs
+
+        # Incandescence core check: Combustion flames produce intense sensor luminance saturation (>= 235.0)
+        # Warm floor tiles, wooden panels, and ambient interior lighting (luminance 180-225) lack thermal combustion
+        max_lum = metrics.get("max_luminance", 200.0)
+        if max_lum < 235.0:
+            obs.validation_status = SpecializedValidationStatus.REJECTED
+            obs.validation_reason = f"Sub-incandescent optical luminance ({max_lum:.1f} < 235.0): consistent with warm ambient surface or lighting reflection, lacks combustion core"
+            return obs
+
         obs.validation_status = SpecializedValidationStatus.VALID
         obs.validation_reason = "Fire chromaticity and luminance thermal profile validated"
         return obs

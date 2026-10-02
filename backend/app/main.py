@@ -80,10 +80,30 @@ app.include_router(cyber_router, prefix="/api")
 
 @app.on_event("startup")
 def on_startup():
-    """Ensure persistent volume directories and seed database exist on startup."""
+    """Ensure persistent volume directories, seed database, thread limits, and crash recovery on startup."""
     try:
         from scripts.init_railway_storage import init_railway_storage
         init_railway_storage()
+    except Exception:
+        pass
+
+    # Phase 20.3: Constrain PyTorch CPU threads to prevent thread-local memory explosion
+    try:
+        import torch
+        torch.set_num_threads(settings.TORCH_NUM_THREADS)
+    except Exception:
+        pass
+
+    # Phase 20.3: Crash-Safe Video Processing State recovery
+    try:
+        from app.api.videos import recover_stale_processing_jobs
+        recover_stale_processing_jobs()
+    except ImportError:
+        try:
+            from backend.app.api.videos import recover_stale_processing_jobs
+            recover_stale_processing_jobs()
+        except Exception:
+            pass
     except Exception:
         pass
 
