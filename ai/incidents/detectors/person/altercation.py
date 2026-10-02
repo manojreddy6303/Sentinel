@@ -7,6 +7,7 @@ Detects observable physical agitation or altercation patterns between individual
 - Multi-signal validation strictly suppressing normal conversation, queues, and parallel walking
 - Strictly conservative observational review labeling (NEVER definitive 'fight')
 """
+import math
 from typing import List, Dict, Any, Optional
 
 from ai.incidents.base_detector import BaseIncidentDetector
@@ -78,6 +79,20 @@ class PhysicalAltercationDetector(BaseIncidentDetector):
                 # 1. Evaluate Reciprocal Motion
                 recip = PersonMotionFeatureEngine.compute_reciprocal_motion(p1, p2)
                 if not recip["is_reciprocal"] or recip["reciprocal_score"] < self.min_reciprocal_score or recip.get("is_passing"):
+                    continue
+
+                # Check if either track is interacting with an object / portable property (theft/takeaway sequence)
+                has_property_interaction = False
+                for t in (context.tracks if context else []):
+                    if t.object_class != "person" and t.is_validated and t.trajectory:
+                        for p_cand in [p1, p2]:
+                            if p_cand.trajectory:
+                                p_last = p_cand.trajectory[-1]
+                                t_last = t.trajectory[-1]
+                                if math.hypot(p_last[1] - t_last[1], p_last[2] - t_last[2]) < 85.0:
+                                    has_property_interaction = True
+                                    break
+                if has_property_interaction:
                     continue
 
                 event_t = (max(p1.first_seen, p2.first_seen) + min(p1.last_seen, p2.last_seen)) / 2.0

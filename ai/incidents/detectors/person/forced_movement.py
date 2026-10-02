@@ -117,7 +117,28 @@ class ForcedMovementDetector(BaseIncidentDetector):
                 if avg_dist > self.max_proximity_px:
                     continue
 
-                # Check for MULTIPLE significant direction changes while in lockstep
+                # Both tracks must undergo genuine spatial transit across the scene.
+                # Stationary proximity, detector jitter, or dwelling in place (< 25px) is NOT forced movement.
+                disp1 = math.hypot(pts1[-1][1] - pts1[0][1], pts1[-1][2] - pts1[0][2])
+                disp2 = math.hypot(pts2[-1][1] - pts2[0][1], pts2[-1][2] - pts2[0][2])
+                if disp1 < 25.0 or disp2 < 25.0:
+                    continue
+
+                # Check if either track is interacting with an object / portable property (theft/takeaway sequence)
+                has_property_interaction = False
+                for t in (context.tracks if context else []):
+                    if t.object_class != "person" and t.is_validated and t.trajectory:
+                        for p_cand in [p1, p2]:
+                            if p_cand.trajectory:
+                                p_last = p_cand.trajectory[-1]
+                                t_last = t.trajectory[-1]
+                                if math.hypot(p_last[1] - t_last[1], p_last[2] - t_last[2]) < 85.0:
+                                    has_property_interaction = True
+                                    break
+                if has_property_interaction:
+                    continue
+
+                # Check for synchronized direction changes while in lockstep
                 headings = []
                 for k in range(len(pts1) - 1):
                     dx = pts1[k + 1][1] - pts1[k][1]

@@ -55,7 +55,7 @@ class BehaviorAnalyzer:
         self.theft_min_departure_distance = (
             theft_min_departure_distance
             if theft_min_departure_distance is not None
-            else getattr(settings, "THEFT_MIN_DEPARTURE_DISTANCE", 70.0)
+            else getattr(settings, "THEFT_MIN_DEPARTURE_DISTANCE", 45.0)
         )
         self.theft_object_loss_window = (
             theft_object_loss_window

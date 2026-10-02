@@ -75,7 +75,7 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
         self.min_departure_distance = (
             min_departure_distance
             if min_departure_distance is not None
-            else getattr(settings, "THEFT_MIN_DEPARTURE_DISTANCE", 70.0)
+            else getattr(settings, "THEFT_MIN_DEPARTURE_DISTANCE", 45.0)
         )
         self.object_loss_window = (
             object_loss_window

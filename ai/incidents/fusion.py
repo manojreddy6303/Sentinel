@@ -62,7 +62,10 @@ class IncidentFusionEngine:
         # 4. Cross-modal fire + smoke incident fusion (Phase 15)
         candidates = self._fuse_fire_and_smoke_interactions(candidates)
 
-        # 5. Group candidates by event_type
+        # 5. Cross-domain arbitration: Property Takeaway / Theft vs Incidental Person Interaction
+        candidates = self._arbitrate_property_vs_person_interactions(candidates)
+
+        # 6. Group candidates by event_type
         by_type: Dict[str, List[IncidentCandidate]] = defaultdict(list)
         for c in candidates:
             by_type[c.event_type].append(c)
@@ -629,6 +632,54 @@ class IncidentFusionEngine:
             arbitrated.append(primary)
 
         return other_cands + arbitrated
+
+    def _arbitrate_property_vs_person_interactions(
+        self,
+        candidates: List[IncidentCandidate],
+    ) -> List[IncidentCandidate]:
+        """
+        Cross-domain arbitration: Property Takeaway / Theft vs Incidental Person Interaction.
+        When a person track is participating in a coherent property takeaway sequence
+        (approach -> dwell/interaction -> object removal/relocation -> departure),
+        contemporaneous, ungrounded person-interaction candidates (POTENTIAL_PHYSICAL_ALTERCATION,
+        POTENTIAL_FORCED_MOVEMENT) on that track arising from incidental proximity to bystanders
+        must not outrank or obscure the theft interpretation.
+        """
+        theft_cands = [c for c in candidates if "THEFT" in c.event_type or "TAKEAWAY" in c.event_type]
+        if not theft_cands:
+            return candidates
+
+        theft_tracks = set()
+        for th in theft_cands:
+            for tid in th.track_ids:
+                theft_tracks.add(tid)
+
+        arbitrated: List[IncidentCandidate] = []
+        for c in candidates:
+            if c.event_type in ("POTENTIAL_PHYSICAL_ALTERCATION", "POTENTIAL_FORCED_MOVEMENT"):
+                # Check if this person candidate overlaps temporally with a theft on a shared track
+                overlaps_theft = False
+                for th in theft_cands:
+                    if set(c.track_ids).intersection(set(th.track_ids)):
+                        if TemporalAnalysisEngine.is_temporally_overlapping(
+                            th.start_time, th.end_time,
+                            c.start_time, c.end_time,
+                            tolerance_seconds=5.0,
+                        ):
+                            overlaps_theft = True
+                            if th.incident_metadata is None:
+                                th.incident_metadata = {}
+                            alts = th.incident_metadata.get("alternate_hypotheses", [])
+                            if c.event_type not in alts:
+                                alts.append(c.event_type)
+                            th.incident_metadata["alternate_hypotheses"] = alts
+                            break
+                if not overlaps_theft:
+                    arbitrated.append(c)
+            else:
+                arbitrated.append(c)
+
+        return arbitrated
 
     def _fuse_fire_and_smoke_interactions(self, candidates: List[IncidentCandidate]) -> List[IncidentCandidate]:
         """

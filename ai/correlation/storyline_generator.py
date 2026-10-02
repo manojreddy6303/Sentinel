@@ -54,10 +54,18 @@ class IncidentStorylineGenerator:
 
         # 1. Property / Takeaway Pattern
         if "theft" in subcategory.lower() or "takeaway" in subcategory.lower():
-            person_trks = [t for t in primary_tracks + supporting_tracks if "person" in t.lower() or "trk" in t.lower()]
-            obj_trks = [t for t in supporting_tracks + primary_tracks if t not in person_trks]
-            p_label = person_trks[0] if person_trks else "Track"
-            o_label = obj_trks[0] if obj_trks else "target object"
+            if len(primary_tracks) >= 2:
+                p_label = primary_tracks[0]
+                o_label = primary_tracks[1]
+            elif primary_tracks and supporting_tracks:
+                p_label = primary_tracks[0]
+                o_label = supporting_tracks[0]
+            elif primary_tracks:
+                p_label = primary_tracks[0]
+                o_label = "target object"
+            else:
+                p_label = "Track"
+                o_label = "target object"
             target_class = [c for c in object_classes if c != "person"]
             cls_label = target_class[0] if target_class else "object"
 
@@ -71,10 +79,18 @@ class IncidentStorylineGenerator:
             )
             return narrative
         elif category == "property" or any(k in subcategory.lower() for k in ("displacement", "pickup", "moving", "transport")):
-            person_trks = [t for t in primary_tracks + supporting_tracks if "person" in t.lower() or "trk" in t.lower()]
-            obj_trks = [t for t in supporting_tracks + primary_tracks if t not in person_trks]
-            p_label = person_trks[0] if person_trks else "Track"
-            o_label = obj_trks[0] if obj_trks else "target object"
+            if len(primary_tracks) >= 2:
+                p_label = primary_tracks[0]
+                o_label = primary_tracks[1]
+            elif primary_tracks and supporting_tracks:
+                p_label = primary_tracks[0]
+                o_label = supporting_tracks[0]
+            elif primary_tracks:
+                p_label = primary_tracks[0]
+                o_label = "target object"
+            else:
+                p_label = "Track"
+                o_label = "target object"
             target_class = [c for c in object_classes if c != "person"]
             cls_label = target_class[0] if target_class else "object"
             narrative = (

@@ -369,13 +369,19 @@ class InvestigationParser:
                 },
             }
 
-        if re.search(r"\b(theft\s+patterns?|theft\s+events?|possible\s+thefts?|thefts?|stealing|object\s+takeaways?|takeaway\s+patterns?|burglary)\b", cleaned):
+        if re.search(r"\b(theft\s+patterns?|theft\s+events?|possible\s+thefts?|thefts?|stealing|stolen|what\s+was\s+stolen|object\s+takeaways?|takeaway\s+patterns?|burglary)\b", cleaned):
+            t_start, t_end, c_min, c_max = InvestigationParser._extract_time_and_conf(cleaned)
+            filters: Dict[str, Any] = {"event_type": "POTENTIAL_THEFT"}
+            if t_start is not None:
+                filters["start_time"] = t_start
+            if t_end is not None:
+                filters["end_time"] = t_end
+            if c_min is not None:
+                filters["min_confidence"] = c_min
             return {
                 "is_supported": True,
                 "result_type": "security_events",
-                "interpreted_filters": {
-                    "event_type": "POTENTIAL_THEFT",
-                },
+                "interpreted_filters": filters,
             }
 
         if re.search(r"\b(property\s+incidents?|property\s+events?|object\s+incidents?|object\s+events?)\b", cleaned):
@@ -1120,6 +1126,15 @@ class InvestigationParser:
                 )
                 if before_match:
                     end_time = float(before_match.group(1))
+
+                at_match = re.search(
+                    r"(?:at|around)\s+(\d+(?:\.\d+)?)(?:\s*(?:seconds|secs|s))?",
+                    cleaned,
+                )
+                if at_match and start_time is None and end_time is None:
+                    point = float(at_match.group(1))
+                    start_time = max(0.0, point - 2.0)
+                    end_time = point + 2.0
 
         if start_time is not None and end_time is not None and start_time > end_time:
             start_time, end_time = end_time, start_time

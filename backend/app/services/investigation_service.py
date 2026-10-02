@@ -10,6 +10,7 @@ Handles structured execution of parsed queries against the relational database:
 
 import logging
 from typing import Dict, Any, List, Optional
+from sqlalchemy import func
 from database.session import SessionLocal
 from database.models import (
     EventModel,
@@ -556,9 +557,11 @@ class InvestigationService:
             q = q.filter(SecurityEventModel.event_type.in_(PROPERTY_EVENT_TYPES + ["POTENTIAL_WEAPON_VISUAL"]))
 
         if filters.get("start_time") is not None:
-            q = q.filter(SecurityEventModel.timestamp_seconds >= filters["start_time"])
+            q = q.filter(
+                (SecurityEventModel.timestamp_seconds + func.coalesce(SecurityEventModel.duration_seconds, 0.0) >= filters["start_time"] - 5.0)
+            )
         if filters.get("end_time") is not None:
-            q = q.filter(SecurityEventModel.timestamp_seconds <= filters["end_time"])
+            q = q.filter(SecurityEventModel.timestamp_seconds <= filters["end_time"] + 5.0)
         if filters.get("min_confidence") is not None:
             q = q.filter(SecurityEventModel.confidence >= filters["min_confidence"])
         if filters.get("max_confidence") is not None:

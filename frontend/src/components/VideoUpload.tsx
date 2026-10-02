@@ -2406,7 +2406,23 @@ export default function VideoUpload({
                         </div>
                       ) : (
                         <div className="space-y-3">
-                          {incidentList.slice(0, 3).map((inc) => (
+                          {[...incidentList]
+                            .sort((a, b) => {
+                              const getRank = (inc: CorrelatedIncident) => {
+                                const cat = (inc.incident_category || "").toLowerCase();
+                                const sub = (inc.incident_subcategory || "").toLowerCase();
+                                if (cat.includes("property") || sub.includes("theft") || sub.includes("takeaway")) return 100;
+                                if (cat.includes("safety") || sub.includes("collision") || cat.includes("fire")) return 80;
+                                if (sub.includes("altercation") || sub.includes("forced")) return 60;
+                                if (sub.includes("coordinated") || sub.includes("fall")) return 40;
+                                return 10;
+                              };
+                              const diff = getRank(b) - getRank(a);
+                              if (diff !== 0) return diff;
+                              return (b.assessment_score || 0) - (a.assessment_score || 0);
+                            })
+                            .slice(0, 3)
+                            .map((inc) => (
                             <div
                               key={inc.incident_id}
                               className="p-4 rounded-lg bg-[#1D2128] border border-[#2A3038] hover:border-[#3A424E] transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3"

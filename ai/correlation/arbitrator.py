@@ -8,6 +8,7 @@ Resolves mutually exclusive explanations while preserving provenance of alternat
 from typing import List, Dict, Any, Tuple
 from ai.correlation.models import HypothesisOutcome
 from ai.incidents.schemas import IncidentCandidate, ValidationDecision
+from ai.incidents.temporal import TemporalAnalysisEngine
 
 
 class CompetingHypothesisArbitrator:
@@ -72,9 +73,9 @@ class CompetingHypothesisArbitrator:
         prop_cands = [c for c in non_collision_cands if any(k in c.event_type for k in ("THEFT", "TAKEAWAY", "PICKUP", "DISPLACEMENT", "REMOVAL", "ABANDONED"))]
         rem_cands = [c for c in non_collision_cands if c not in prop_cands]
 
+        thefts = [c for c in prop_cands if "THEFT" in c.event_type or "TAKEAWAY" in c.event_type]
         if prop_cands:
             # Group by shared object track if available
-            thefts = [c for c in prop_cands if "THEFT" in c.event_type or "TAKEAWAY" in c.event_type]
             intermediates = [c for c in prop_cands if c not in thefts]
 
             if thefts and intermediates:
@@ -91,6 +92,22 @@ class CompetingHypothesisArbitrator:
         # 3. Person Arbitration (Following vs Coordinated Movement vs Altercation)
         for c in rem_cands:
             results.append((c, CompetingHypothesisArbitrator._get_candidate_outcome(c), []))
+
+        # 4. Cross-Domain Arbitration: Property Takeaway / Theft vs Incidental Person Interaction
+        # When a coherent property takeaway sequence exists (approach -> dwell -> object removal/relocation -> departure),
+        # incidental person altercation or forced movement claims on that same person track are superseded.
+        if thefts:
+            for th in thefts:
+                th_tracks = set(th.track_ids)
+                for idx, (c, outcome, alts) in enumerate(results):
+                    if outcome != HypothesisOutcome.SUPERSEDED and c.event_type in ("POTENTIAL_PHYSICAL_ALTERCATION", "POTENTIAL_FORCED_MOVEMENT"):
+                        if set(c.track_ids).intersection(th_tracks):
+                            if TemporalAnalysisEngine.is_temporally_overlapping(
+                                th.start_time, th.end_time,
+                                c.start_time, c.end_time,
+                                tolerance_seconds=5.0,
+                            ):
+                                results[idx] = (c, HypothesisOutcome.SUPERSEDED, [th.event_type])
 
         return results
 

@@ -484,14 +484,25 @@ class PropertyCorrelationPolicy:
                 rel_rating = "HIGH" if score >= 0.80 else "MODERATE"
                 ev_str = score * 0.9
 
+            ordered_tracks = []
+            for tid in lead.track_ids:
+                if tid and tid not in ordered_tracks:
+                    ordered_tracks.append(tid)
+            for tid in all_tracks:
+                if tid and tid not in ordered_tracks:
+                    ordered_tracks.append(tid)
+
+            primary_trks = ordered_tracks[:2] if len(ordered_tracks) >= 2 else ordered_tracks[:1]
+            supporting_trks = ordered_tracks[len(primary_trks):]
+
             storyline = IncidentStorylineGenerator.generate_storyline(
                 category="property",
                 subcategory="potential_object_takeaway_pattern",
                 start_time=start_t,
                 end_time=end_t,
                 duration=dur,
-                primary_tracks=[t for t in all_tracks if "person" in t.lower() or "0" in t][:1],
-                supporting_tracks=[t for t in all_tracks if t not in [t for t in all_tracks if "person" in t.lower() or "0" in t][:1]],
+                primary_tracks=primary_trks,
+                supporting_tracks=supporting_trks,
                 object_classes=all_classes,
                 relationships=matched_rels,
                 supporting_signals=all_signals,
@@ -514,8 +525,8 @@ class PropertyCorrelationPolicy:
                 pattern_evidence_strength=pattern_str,
                 reliability_rating=rel_rating,
                 validation_decision=val_dec,
-                primary_track_ids=all_tracks[:2],
-                supporting_track_ids=all_tracks[2:],
+                primary_track_ids=primary_trks,
+                supporting_track_ids=supporting_trks,
                 involved_object_classes=all_classes,
                 source_candidate_ids=all_cand_ids,
                 source_detector_ids=all_dets,

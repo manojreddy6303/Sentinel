@@ -192,6 +192,11 @@ class GeminiProvider(LLMProvider):
             "If only an isolated low-confidence (<0.50) detection is present for an object, describe it as an isolated low-confidence model prediction that did not persist across frames, rather than claiming the object was present. "
             "Only describe an object as confirmed or active when supported by persistent, validated detections.\n"
             "For potential theft behavioral patterns, refer to 'Potential Theft Pattern (Human verification required)' and never claim legal confirmation or call a person a thief.\n"
+            "When summarizing footage or responding to theft/takeaway questions, clearly separate:\n"
+            "### VIDEO ACTIVITY SUMMARY\n"
+            "### OBSERVED EVIDENCE\n"
+            "### INTERPRETATION\n"
+            "Never claim certainty that the video cannot establish. Use 'potential theft', 'evidence is consistent with', and 'review recommended'. Never state that a person stole something as an established fact.\n"
             "Always cite evidence and events using tags like [08.01s], [DET-XXXX], [EVENT-XXXX], or [EV-XXXX] where available.\n"
             "If no records were found, clearly state that no matching data was detected.\n"
             "Be professional, concise, and structured."
@@ -254,14 +259,28 @@ class MockLLMProvider(LLMProvider):
                 "object_classes": ["person"],
             }
 
-        if any(term in q for term in ["criminal", "thief", "steal", "terrorist", "guilty"]):
+        if any(term in q for term in ["criminal", "thief", "thieves", "terrorist", "guilty"]):
             return {
                 "intent": "guardrail",
                 "guardrail_category": "criminal_attribution",
             }
 
-        # Summary check
-        if any(term in q for term in ["summarize", "summary", "overview", "activity in this video"]):
+        # Time extraction mock (e.g. "around 8 seconds", "between 8 and 12 seconds", "around 163 seconds")
+        start_time = None
+        end_time = None
+        around_match = re.search(r"around\s+(\d+(?:\.\d+)?)(?:\s*(?:seconds|secs|s))?", q)
+        if around_match:
+            val = float(around_match.group(1))
+            start_time = max(0.0, val - 2.0)
+            end_time = val + 2.0
+
+        between_match = re.search(r"between\s+(\d+(?:\.\d+)?)\s*(?:and|to|-)\s*(\d+(?:\.\d+)?)(?:\s*(?:seconds|secs|s))?", q)
+        if between_match:
+            start_time = float(between_match.group(1))
+            end_time = float(between_match.group(2))
+
+        # Summary check (only when no specific time window is targeted)
+        if any(term in q for term in ["summarize", "summary", "overview", "what happened", "activity in this video"]) and start_time is None:
             return {
                 "intent": "summarize",
                 "is_summary_request": True,
@@ -279,12 +298,12 @@ class MockLLMProvider(LLMProvider):
             }
 
         # Phase 8: Potential theft / takeaway behavior check
-        if any(term in q for term in ["theft", "takeaway", "burglary"]):
+        if any(term in q for term in ["theft", "takeaway", "burglary", "stolen", "stealing"]):
             return {
                 "intent": "investigate",
                 "object_classes": None,
-                "start_time": None,
-                "end_time": None,
+                "start_time": start_time,
+                "end_time": end_time,
                 "min_confidence": None,
                 "event_type": "POTENTIAL_THEFT",
                 "result_type": "security_events",
@@ -294,12 +313,12 @@ class MockLLMProvider(LLMProvider):
             }
 
         # Phase 8: Security events review
-        if any(term in q for term in ["which events", "review", "security events"]):
+        if any(term in q for term in ["which events", "review", "security events", "what happened"]):
             return {
                 "intent": "investigate",
                 "object_classes": None,
-                "start_time": None,
-                "end_time": None,
+                "start_time": start_time,
+                "end_time": end_time,
                 "min_confidence": None,
                 "event_type": None,
                 "result_type": "security_events",
@@ -308,26 +327,31 @@ class MockLLMProvider(LLMProvider):
                 "guardrail_category": None,
             }
 
+        # Clothing / track query delegation
+        if any(c in q for c in ["blue", "red", "black", "white", "green", "yellow", "dress", "lady", "jacket", "coat", "hoodie", "shirt"]):
+            from backend.app.services.investigation_parser import InvestigationParser
+            p_res = InvestigationParser.parse_query(user_query)
+            if p_res.get("result_type") == "tracks":
+                f = p_res.get("interpreted_filters", {})
+                return {
+                    "intent": "investigate",
+                    "object_classes": [f.get("object_class", "person")],
+                    "start_time": f.get("start_time"),
+                    "end_time": f.get("end_time"),
+                    "min_confidence": f.get("min_confidence"),
+                    "color": f.get("color"),
+                    "result_type": "tracks",
+                    "is_summary_request": False,
+                    "is_activity_request": False,
+                    "guardrail_category": None,
+                }
+
         # Parameter extraction mock
         obj_class = None
         for cls in ["car", "person", "bicycle", "truck", "bus", "dog"]:
             if cls in q:
                 obj_class = cls
                 break
-
-        # Time extraction mock (e.g. "around 8 seconds", "between 8 and 12 seconds")
-        start_time = None
-        end_time = None
-        around_match = re.search(r"around\s+(\d+(?:\.\d+)?)\s*s", q)
-        if around_match:
-            val = float(around_match.group(1))
-            start_time = max(0.0, val - 1.0)
-            end_time = val + 1.0
-
-        between_match = re.search(r"between\s+(\d+(?:\.\d+)?)\s*and\s+(\d+(?:\.\d+)?)\s*s", q)
-        if between_match:
-            start_time = float(between_match.group(1))
-            end_time = float(between_match.group(2))
 
         return {
             "intent": "investigate",
@@ -360,16 +384,43 @@ class MockLLMProvider(LLMProvider):
         evidence = retrieved_data.get("evidence", [])
         filters = retrieved_data.get("filters", {})
 
-        if filters.get("event_type") == "POTENTIAL_THEFT":
-            if count > 0 and results:
-                first = results[0]
-                ts = first.get("timestamp") if first.get("timestamp") is not None else first.get("timestamp_seconds", 0.0)
-                desc = first.get("description", "")
-                return (
-                    f"Sentinel identified a potential object-takeaway pattern around {ts:.1f}s "
-                    f"(Human verification required). {desc} Review the linked evidence."
-                )
+        theft_matches = [r for r in results if r.get("event_type") in ("POTENTIAL_THEFT", "POTENTIAL_OBJECT_TAKEAWAY")]
+        if filters.get("event_type") in ("POTENTIAL_THEFT", "POTENTIAL_OBJECT_TAKEAWAY") or theft_matches:
+            if theft_matches or (count > 0 and results):
+                lead = theft_matches[0] if theft_matches else results[0]
+                ts = lead.get("timestamp") if lead.get("timestamp") is not None else lead.get("timestamp_seconds", 0.0)
+                dur = lead.get("duration_seconds") or 0.0
+                end_ts = ts + dur if dur > 0 else ts
+                desc = lead.get("description", "")
+                interval_str = f"[{ts:.1f}s – {end_ts:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
+                parts = [
+                    "### VIDEO ACTIVITY SUMMARY",
+                    "- A potential theft/takeaway sequence was detected.",
+                    "- A person was observed interacting with an object/property.",
+                    "- The object interaction was followed by movement/removal consistent with takeaway behavior.",
+                    f"- Relevant activity occurred around the detected incident interval {interval_str}.",
+                    "- Preserved evidence is available for review.",
+                    "",
+                    "### OBSERVED EVIDENCE",
+                    f"- **Security Event:** Potential Theft Pattern (potential object-takeaway) detected around {ts:.1f}s.",
+                    f"- **Telemetry & Observation:** {desc}" if desc else f"- **Telemetry & Observation:** Object proximity and interaction observed around {ts:.1f}s.",
+                    f"- **Preserved Records:** {len(evidence)} forensic artifact(s) registered in vault." if evidence else "- **Preserved Records:** Validated evidence snapshot and clip available for review.",
+                    "",
+                    "### INTERPRETATION",
+                    "- Evidence is consistent with a potential theft / potential takeaway pattern.",
+                    "- Review recommended (Human verification required; Sentinel reports observational patterns and does not establish legal culpability).",
+                ]
+                return "\n".join(parts)
             return "No potential theft pattern was detected in the available visual evidence."
+
+        if results and "activity_summary" in results[0]:
+            first = results[0]
+            col = filters.get("color")
+            obj = first.get("object_class", "person")
+            return (
+                f"Sentinel identified {count} matching {obj} record(s). "
+                f"Track {first.get('track_id')} ({col or ''} {obj}): {first.get('activity_summary')}"
+            )
 
         if count == 0 and not retrieved_data.get("is_summary"):
             return "No matching Sentinel data was found for this question."

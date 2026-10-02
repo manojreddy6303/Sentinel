@@ -207,7 +207,7 @@ class Settings:
     # -------------------------------------------------------------------------
     THEFT_MIN_INTERACTION_SECONDS: float = float(os.getenv("THEFT_MIN_INTERACTION_SECONDS", "2.0"))
     THEFT_INTERACTION_MAX_DISTANCE: float = float(os.getenv("THEFT_INTERACTION_MAX_DISTANCE", "120.0"))
-    THEFT_MIN_DEPARTURE_DISTANCE: float = float(os.getenv("THEFT_MIN_DEPARTURE_DISTANCE", "70.0"))
+    THEFT_MIN_DEPARTURE_DISTANCE: float = float(os.getenv("THEFT_MIN_DEPARTURE_DISTANCE", "45.0"))
     THEFT_OBJECT_LOSS_WINDOW: float = float(os.getenv("THEFT_OBJECT_LOSS_WINDOW", "4.0"))
     THEFT_TARGET_CLASSES: Set[str] = {
         "backpack", "handbag", "suitcase", "laptop", "cell phone",

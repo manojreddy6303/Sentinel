@@ -120,7 +120,23 @@ class InvestigationOrchestrator:
     def _deterministic_intent_fallback(self, query: str) -> Dict[str, Any]:
         """Use Phase 5A parser to extract structured intent when LLM is unavailable."""
         q = query.lower()
-        if any(w in q for w in ["summary", "summarize", "overview", "what happened in this video"]):
+        if any(w in q for w in ["summary", "summarize", "overview", "what happened in this video", "what happened", "what occurred"]):
+            parsed = self.investigation_service.parser.parse_query(query)
+            filters = parsed.get("interpreted_filters", {})
+            if filters.get("start_time") is not None or filters.get("end_time") is not None:
+                return {
+                    "intent": "investigate",
+                    "is_supported": True,
+                    "is_summary_request": False,
+                    "is_activity_request": False,
+                    "object_class": filters.get("object_class"),
+                    "start_time": filters.get("start_time"),
+                    "end_time": filters.get("end_time"),
+                    "min_confidence": filters.get("min_confidence"),
+                    "event_type": filters.get("event_type"),
+                    "category": filters.get("category"),
+                    "result_type": "security_events",
+                }
             return {
                 "intent": "summarize",
                 "is_supported": True,
@@ -133,15 +149,17 @@ class InvestigationOrchestrator:
                 "result_type": "events",
             }
         if any(w in q for w in ["theft", "stealing", "takeaway", "burglary", "stolen"]):
+            parsed = self.investigation_service.parser.parse_query(query)
+            filters = parsed.get("interpreted_filters", {})
             return {
                 "intent": "investigate",
                 "is_supported": True,
                 "is_summary_request": False,
                 "is_activity_request": False,
                 "object_class": None,
-                "start_time": None,
-                "end_time": None,
-                "min_confidence": None,
+                "start_time": filters.get("start_time"),
+                "end_time": filters.get("end_time"),
+                "min_confidence": filters.get("min_confidence"),
                 "event_type": "POTENTIAL_THEFT",
                 "result_type": "security_events",
             }
@@ -275,22 +293,46 @@ class InvestigationOrchestrator:
                     class_lines_list.append(f"{c.capitalize()} ({cnt} observations)")
             class_lines = ", ".join(class_lines_list) if class_lines_list else "None"
 
-            answer_parts = [
-                f"### VIDEO ACTIVITY SUMMARY",
-                f"- **Duration:** {duration_str}",
-                f"- **Validated Detection Observations:** {total_detections}",
-                f"- **Anonymous Tracks:** {total_tracks}",
-                f"- **Detected Object Classes:** {class_lines}",
-                f"- **Timeline Events:** {len(grouped_events)}",
-            ]
-            if peak_window:
-                answer_parts.append(f"- **Peak Activity Window:** {peak_window}")
-            if sec_events:
-                answer_parts.append(f"- **Security Events:** {len(sec_events)}")
-                if theft_sec:
-                    th = theft_sec[0]
-                    answer_parts.append(f"- **Security Findings:** Potential object-takeaway pattern observed around {th.timestamp_seconds:.1f}s.")
-            answer_parts.append(f"- **Preserved Evidence Items:** {len(evidence_items)}")
+            if theft_sec:
+                th = theft_sec[0]
+                th_dur = th.duration_seconds or 0.0
+                th_end = th.timestamp_seconds + th_dur if th_dur > 0 else th.timestamp_seconds
+                th_interval = f"[{th.timestamp_seconds:.1f}s – {th_end:.1f}s]" if th_dur > 0 else f"around {th.timestamp_seconds:.1f}s"
+                answer_parts = [
+                    "### VIDEO ACTIVITY SUMMARY",
+                    "- A potential theft/takeaway sequence was detected.",
+                    "- A person was observed interacting with an object/property.",
+                    "- The object interaction was followed by movement/removal consistent with takeaway behavior.",
+                    f"- Relevant activity occurred around the detected incident interval {th_interval}.",
+                    "- Preserved evidence is available for review.",
+                    "",
+                    "### OBSERVED EVIDENCE",
+                    f"- **Duration:** {duration_str}",
+                    f"- **Validated Detection Observations:** {total_detections}",
+                    f"- **Anonymous Tracks:** {total_tracks} ({class_lines})",
+                    f"- **Security Event:** Potential object-takeaway pattern ({th.event_type}) detected at {th.timestamp_seconds:.1f}s.",
+                    f"- **Telemetry & Observation:** {th.description}" if th.description else f"- **Telemetry & Observation:** Track {th.track_id} interacted with property with subsequent departure telemetry.",
+                    f"- **Timeline Events:** {len(grouped_events)}",
+                    f"- **Preserved Evidence Items:** {len(evidence_items)} forensic records registered in vault.",
+                    "",
+                    "### INTERPRETATION",
+                    "- Evidence is consistent with a potential theft / potential takeaway sequence.",
+                    "- Review recommended (Human verification required; Sentinel reports observational patterns and does not establish legal culpability).",
+                ]
+            else:
+                answer_parts = [
+                    f"### VIDEO ACTIVITY SUMMARY",
+                    f"- **Duration:** {duration_str}",
+                    f"- **Validated Detection Observations:** {total_detections}",
+                    f"- **Anonymous Tracks:** {total_tracks}",
+                    f"- **Detected Object Classes:** {class_lines}",
+                    f"- **Timeline Events:** {len(grouped_events)}",
+                ]
+                if peak_window:
+                    answer_parts.append(f"- **Peak Activity Window:** {peak_window}")
+                if sec_events:
+                    answer_parts.append(f"- **Security Events:** {len(sec_events)}")
+                answer_parts.append(f"- **Preserved Evidence Items:** {len(evidence_items)}")
 
             formatted_evidence = [
                 {
@@ -359,11 +401,25 @@ class InvestigationOrchestrator:
 
             if theft_events:
                 th = theft_events[0]
-                th_end = th.timestamp_seconds + (th.duration_seconds or 0.0)
-                answer = (
-                    f"Sentinel identified a potential object-takeaway pattern around [{th.timestamp_seconds:.1f}s – {th_end:.1f}s]. "
-                    f"{th.description} Review the linked evidence."
-                )
+                th_dur = th.duration_seconds or 0.0
+                th_end = th.timestamp_seconds + th_dur
+                th_interval = f"[{th.timestamp_seconds:.1f}s – {th_end:.1f}s]" if th_dur > 0 else f"around {th.timestamp_seconds:.1f}s"
+                answer = "\n".join([
+                    "### VIDEO ACTIVITY SUMMARY",
+                    "- A potential theft/takeaway sequence was detected.",
+                    "- A person was observed interacting with an object/property.",
+                    "- The object interaction was followed by movement/removal consistent with takeaway behavior.",
+                    f"- Relevant activity occurred around the detected incident interval {th_interval}.",
+                    "- Preserved evidence is available for review.",
+                    "",
+                    "### OBSERVED EVIDENCE",
+                    f"- **Security Event:** Potential object-takeaway pattern ({th.event_type}) detected at {th.timestamp_seconds:.1f}s.",
+                    f"- **Telemetry & Observation:** {th.description}" if th.description else f"- **Telemetry & Observation:** Track {th.track_id} interacted with property with subsequent departure telemetry.",
+                    "",
+                    "### INTERPRETATION",
+                    "- Evidence is consistent with a potential theft / potential takeaway pattern.",
+                    "- Review recommended (Human verification required; Sentinel reports observational patterns and does not establish legal culpability).",
+                ])
                 evidence_records = (
                     db.query(EvidenceModel)
                     .filter(
@@ -739,15 +795,33 @@ class InvestigationOrchestrator:
                 return "Search executed successfully. No validated vehicle detections were found in this investigation."
             return "No reliable vehicle incident was detected in the available Sentinel data."
 
-        if filters.get("event_type") == "POTENTIAL_THEFT":
-            if count > 0 and results:
-                first = results[0]
-                ts = first.get("timestamp", 0.0)
-                desc = first.get("description", "")
-                return (
-                    f"Sentinel identified a Potential Theft Pattern (potential object-takeaway pattern) around {ts:.1f}s "
-                    f"(Human verification required). {desc} Review the linked forensic evidence."
-                )
+        theft_matches = [r for r in results if r.get("event_type") in ("POTENTIAL_THEFT", "POTENTIAL_OBJECT_TAKEAWAY")]
+        if filters.get("event_type") in ("POTENTIAL_THEFT", "POTENTIAL_OBJECT_TAKEAWAY") or theft_matches or filters.get("category") == "property":
+            if theft_matches or (count > 0 and results):
+                lead = theft_matches[0] if theft_matches else results[0]
+                ts = lead.get("timestamp", 0.0)
+                dur = lead.get("duration_seconds") or 0.0
+                end_ts = ts + dur if dur > 0 else ts
+                desc = lead.get("description", "")
+                interval_str = f"[{ts:.1f}s – {end_ts:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
+                parts = [
+                    "### VIDEO ACTIVITY SUMMARY",
+                    "- A potential theft/takeaway sequence was detected.",
+                    "- A person was observed interacting with an object/property.",
+                    "- The object interaction was followed by movement/removal consistent with takeaway behavior.",
+                    f"- Relevant activity occurred around the detected incident interval {interval_str}.",
+                    "- Preserved evidence is available for review.",
+                    "",
+                    "### OBSERVED EVIDENCE",
+                    f"- **Security Event:** Potential Theft Pattern (potential object-takeaway) detected around {ts:.1f}s.",
+                    f"- **Visual Telemetry:** {desc}" if desc else f"- **Visual Telemetry:** Object proximity and interaction observed around {ts:.1f}s.",
+                    f"- **Preserved Records:** {len(evidence)} forensic artifact(s) registered in vault." if evidence else "- **Preserved Records:** Validated evidence snapshot and clip available for review.",
+                    "",
+                    "### INTERPRETATION",
+                    "- Evidence is consistent with a potential theft / potential takeaway pattern.",
+                    "- Review recommended (Human verification required; Sentinel reports observational patterns and does not establish legal culpability).",
+                ]
+                return "\n".join(parts)
             return "Search executed successfully. No potential theft pattern was detected in the available visual evidence."
 
         if result_type == "tracks":
