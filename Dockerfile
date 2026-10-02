@@ -20,8 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source code
 COPY . .
 
-# Verify YOLO model loading with compatible torch
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+# Build-time verification: validate PyTorch/Ultralytics versions, trusted YOLO model loading, and CPU inference
+RUN python scripts/verify_yolo_build.py
 
 # Set default production environment variables
 ENV PYTHONPATH=.

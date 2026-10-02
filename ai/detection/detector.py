@@ -69,12 +69,12 @@ class YOLODetector:
         self._model = None  # Lazy-loaded
 
     def _load_model(self):
-        """Load the YOLO model once and cache it on the instance."""
+        """Load the YOLO model once and cache it on the instance with PyTorch 2.6+ compatibility."""
         if self._model is None:
             try:
-                from ultralytics import YOLO
+                from ai.detection.torch_compat import load_trusted_yolo_model
                 logger.info(f"Loading YOLO model: {self.model_name}")
-                self._model = YOLO(self.model_name)
+                self._model = load_trusted_yolo_model(self.model_name)
                 logger.info(f"YOLO model loaded: {self.model_name}")
             except Exception as exc:
                 raise RuntimeError(
