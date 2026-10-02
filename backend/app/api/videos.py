@@ -24,6 +24,7 @@ try:
         PlaybackError,
         PlaybackNotFoundError,
         PlaybackConversionError,
+        PlaybackMemoryPressureError,
     )
 except ImportError:
     from backend.app.core.config import settings
@@ -34,6 +35,7 @@ except ImportError:
         PlaybackError,
         PlaybackNotFoundError,
         PlaybackConversionError,
+        PlaybackMemoryPressureError,
     )
 
 logger = logging.getLogger(__name__)
@@ -536,6 +538,19 @@ def playback_video(video_id: str, request: Request):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Video file for '{video_id}' not found.",
+        )
+    except PlaybackMemoryPressureError as err:
+        logger.warning(f"Playback transcode deferred for {video_id} due to memory bounds: {err}")
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": "playback_transcode_deferred",
+                "message": f"Playback conversion deferred to protect container memory: {str(err)}",
+                "video_id": video_id,
+                "analysis_preserved": True,
+                "retry_after_seconds": 10,
+            },
+            headers={"Retry-After": "10"},
         )
     except PlaybackConversionError as err:
         logger.error(f"Playback conversion error for {video_id}: {err}")

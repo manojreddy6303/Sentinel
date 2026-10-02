@@ -12,6 +12,8 @@ import re
 import shutil
 import subprocess
 import threading
+import time
+import gc
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
@@ -47,6 +49,83 @@ class PlaybackNotFoundError(PlaybackError):
 class PlaybackConversionError(PlaybackError):
     """Raised when transcoding fails."""
     pass
+
+
+class PlaybackMemoryPressureError(PlaybackError):
+    """Raised when available memory is below the safety threshold for transcoding."""
+    pass
+
+
+def get_container_memory_headroom_mb() -> float:
+    """
+    Calculate the actual memory headroom in MB remaining within the container cgroup or host.
+    Checks:
+    1. cgroup v2 (/sys/fs/cgroup/memory.max and /sys/fs/cgroup/memory.current)
+    2. cgroup v1 (/sys/fs/cgroup/memory/memory.limit_in_bytes and /sys/fs/cgroup/memory/memory.usage_in_bytes)
+    3. psutil.virtual_memory().available fallback
+    """
+    # 1. Check cgroup v2
+    cg2_max = Path("/sys/fs/cgroup/memory.max")
+    cg2_curr = Path("/sys/fs/cgroup/memory.current")
+    if cg2_max.exists() and cg2_curr.exists():
+        try:
+            val = cg2_max.read_text().strip()
+            if val != "max":
+                max_bytes = int(val)
+                curr_bytes = int(cg2_curr.read_text().strip())
+                return max(0.0, (max_bytes - curr_bytes) / (1024 * 1024))
+        except Exception:
+            pass
+
+    # 2. Check cgroup v1
+    cg1_limit = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    cg1_usage = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    if cg1_limit.exists() and cg1_usage.exists():
+        try:
+            limit_bytes = int(cg1_limit.read_text().strip())
+            if limit_bytes < (1024 ** 4):
+                usage_bytes = int(cg1_usage.read_text().strip())
+                return max(0.0, (limit_bytes - usage_bytes) / (1024 * 1024))
+        except Exception:
+            pass
+
+    # 3. Fallback to psutil available
+    try:
+        import psutil
+        return psutil.virtual_memory().available / (1024 * 1024)
+    except Exception:
+        return 512.0
+
+
+def is_heavy_analysis_active() -> bool:
+    """Check if heavy video analysis is currently active using the shared semaphore."""
+    try:
+        from backend.app.api.videos import _heavy_processing_semaphore
+        acquired = _heavy_processing_semaphore.acquire(blocking=False)
+        if not acquired:
+            return True
+        _heavy_processing_semaphore.release()
+        return False
+    except Exception:
+        return False
+
+
+def try_acquire_heavy_processing_slot() -> bool:
+    """Attempt to acquire the heavy processing slot for transcoding."""
+    try:
+        from backend.app.api.videos import _heavy_processing_semaphore
+        return _heavy_processing_semaphore.acquire(blocking=False)
+    except Exception:
+        return True
+
+
+def release_heavy_processing_slot() -> None:
+    """Release the heavy processing slot after transcoding."""
+    try:
+        from backend.app.api.videos import _heavy_processing_semaphore
+        _heavy_processing_semaphore.release()
+    except Exception:
+        pass
 
 
 def get_ffmpeg_binary() -> Optional[str]:
@@ -165,8 +244,16 @@ def is_browser_compatible(video_path: Path) -> bool:
 def transcode_to_h264(input_path: Path, output_path: Path) -> Path:
     """
     Transcode an input video file into a browser-compatible H.264 + AAC MP4 file.
-    Uses yuv420p pixel format and +faststart flag for instant streaming.
-    Transcodes into a temporary file first and renames atomically upon completion.
+    Hardened for memory-bounded container execution:
+    - -threads 1 (single-thread execution to prevent thread pool memory explosion)
+    - -preset ultrafast -tune fastdecode (minimal lookahead and frame buffer memory)
+    - -x264opts subme=0:me=dia:no-mbtree:rc-lookahead=0 (eliminates macroblock tree buffer)
+    - scale=1280:720:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2 (caps frame memory)
+    - -maxrate 2000k -bufsize 2000k (caps VBV buffer)
+    - file-based stderr logging (prevents unbounded stderr accumulation in Python RAM)
+    - stdout=subprocess.DEVNULL (no stdout buffering)
+    - active headroom monitoring with emergency process kill if headroom < 50 MB
+    - clean process termination and temporary file cleanup in finally block
     """
     ffmpeg_exe = get_ffmpeg_binary()
     if not ffmpeg_exe:
@@ -174,6 +261,7 @@ def transcode_to_h264(input_path: Path, output_path: Path) -> Path:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_output = output_path.with_name(f"{output_path.name}.tmp.mp4")
+    stderr_log = output_path.with_name(f"{output_path.name}.stderr.log")
 
     if temp_output.exists():
         try:
@@ -181,35 +269,72 @@ def transcode_to_h264(input_path: Path, output_path: Path) -> Path:
         except Exception:
             pass
 
+    if stderr_log.exists():
+        try:
+            stderr_log.unlink()
+        except Exception:
+            pass
+
     cmd = [
         ffmpeg_exe,
         "-y",
-        "-threads", "0",
+        "-threads", "1",
         "-i", str(input_path),
+        "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "23",
+        "-preset", "ultrafast",
+        "-tune", "fastdecode",
+        "-x264opts", "subme=0:me=dia:no-mbtree:rc-lookahead=0",
+        "-crf", "28",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-b:a", "128k",
+        "-b:a", "64k",
+        "-maxrate", "2000k",
+        "-bufsize", "2000k",
         "-movflags", "+faststart",
         str(temp_output),
     ]
 
-    logger.info(f"Starting transcode for playback: {input_path.name} -> {output_path.name}")
+    logger.info(f"Starting memory-hardened transcode for playback: {input_path.name} -> {output_path.name}")
+    proc = None
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 min max for very long surveillance videos
-        )
-        if result.returncode != 0:
-            err_msg = result.stderr[-1000:] if result.stderr else "Unknown ffmpeg error"
-            logger.error(f"ffmpeg transcode failed with code {result.returncode}: {err_msg}")
-            if temp_output.exists():
-                temp_output.unlink()
-            raise PlaybackConversionError(f"Video transcoding failed: {err_msg}")
+        with open(stderr_log, "wb") as err_f:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=err_f,
+            )
+
+        start_time = time.time()
+        timeout = 180  # 3 minutes max
+
+        while proc.poll() is None:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+
+            # Check container memory headroom periodically
+            headroom = get_container_memory_headroom_mb()
+            if headroom < 50.0:
+                logger.error(
+                    "FFmpeg transcode aborted: critical container memory headroom (%.1f MB < 50 MB)",
+                    headroom,
+                )
+                raise PlaybackMemoryPressureError(
+                    f"Transcoding aborted to protect container memory: headroom {headroom:.1f} MB < 50 MB"
+                )
+
+            time.sleep(0.3)
+
+        if proc.returncode != 0:
+            err_msg = "Unknown error"
+            if stderr_log.exists():
+                try:
+                    err_msg = stderr_log.read_text(errors="replace")[-500:].strip()
+                except Exception:
+                    pass
+            logger.error(f"ffmpeg transcode failed with code {proc.returncode}: {err_msg}")
+            raise PlaybackConversionError(f"Video transcoding failed (code {proc.returncode}): {err_msg}")
 
         if not temp_output.exists() or temp_output.stat().st_size == 0:
             raise PlaybackConversionError("Transcode completed but output file is missing or empty.")
@@ -225,21 +350,37 @@ def transcode_to_h264(input_path: Path, output_path: Path) -> Path:
         return output_path
 
     except subprocess.TimeoutExpired:
-        if temp_output.exists():
-            try:
-                temp_output.unlink()
-            except Exception:
-                pass
         raise PlaybackConversionError("Video transcoding timed out.")
     except Exception as exc:
+        if isinstance(exc, (PlaybackConversionError, PlaybackMemoryPressureError)):
+            raise
+        raise PlaybackConversionError(f"Transcoding error: {exc}")
+    finally:
+        # 1. Cleanly terminate child process if still running
+        if proc is not None and proc.poll() is None:
+            logger.warning("Terminating FFmpeg process %s", proc.pid)
+            try:
+                proc.terminate()
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+
+        # 2. Clean temporary files safely
         if temp_output.exists():
             try:
                 temp_output.unlink()
             except Exception:
                 pass
-        if isinstance(exc, PlaybackConversionError):
-            raise
-        raise PlaybackConversionError(f"Transcoding error: {exc}")
+
+        if stderr_log.exists():
+            try:
+                stderr_log.unlink()
+            except Exception:
+                pass
 
 
 def ensure_playback_file(video_id: str, original_path: Path) -> Path:
@@ -247,7 +388,7 @@ def ensure_playback_file(video_id: str, original_path: Path) -> Path:
     Return a browser-compatible playback file for the given video.
     If original is already browser-compatible, returns original_path directly.
     If not, checks for existing playback file. If none, transcodes once and saves
-    to storage/playback/{video_id}_playback.mp4.
+    to storage/playback/{video_id}_playback.mp4 with memory bounds checking.
     """
     if not original_path.exists():
         raise PlaybackNotFoundError(f"Original video for '{video_id}' does not exist.")
@@ -272,6 +413,27 @@ def ensure_playback_file(video_id: str, original_path: Path) -> Path:
         if playback_file.exists() and playback_file.stat().st_size > 0:
             return playback_file
 
+        # Check concurrency with heavy video analysis
+        if is_heavy_analysis_active():
+            raise PlaybackMemoryPressureError(
+                "Video analysis is currently in progress. Playback transcoding deferred to protect container memory."
+            )
+
+        # Pre-check available memory headroom after garbage collection
+        gc.collect()
+        headroom = get_container_memory_headroom_mb()
+        if headroom < 120.0:
+            raise PlaybackMemoryPressureError(
+                f"Container memory headroom ({headroom:.1f} MB) is below the safety threshold (120 MB)."
+            )
+
+        # Acquire heavy processing slot to ensure no video analysis starts during transcode
+        slot_acquired = try_acquire_heavy_processing_slot()
+        if not slot_acquired:
+            raise PlaybackMemoryPressureError(
+                "Another heavy background process is active. Transcoding deferred."
+            )
+
         with _master_lock:
             _in_progress_conversions.add(video_id)
 
@@ -280,6 +442,7 @@ def ensure_playback_file(video_id: str, original_path: Path) -> Path:
         finally:
             with _master_lock:
                 _in_progress_conversions.discard(video_id)
+            release_heavy_processing_slot()
 
 
 def get_playback_status(video_id: str, original_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -318,6 +481,25 @@ def get_playback_status(video_id: str, original_path: Optional[Path] = None) -> 
                 "message": "Native browser playback compatible.",
             }
         else:
+            # Check if conversion would be deferred due to memory bounds or active analysis
+            headroom = get_container_memory_headroom_mb()
+            if is_heavy_analysis_active():
+                return {
+                    "video_id": video_id,
+                    "status": "deferred",
+                    "is_compatible": False,
+                    "is_transcoded": False,
+                    "message": "Video analysis in progress. Playback conversion deferred to protect memory bounds.",
+                }
+            if headroom < 120.0:
+                return {
+                    "video_id": video_id,
+                    "status": "deferred",
+                    "is_compatible": False,
+                    "is_transcoded": False,
+                    "message": f"Conversion deferred to protect container memory (headroom: {headroom:.1f} MB < 120 MB). Detections and data remain intact.",
+                }
+
             return {
                 "video_id": video_id,
                 "status": "needs_conversion",
@@ -340,7 +522,7 @@ def ensure_evidence_clip_playback(evidence_id: str, original_clip_path: Path) ->
     Return a browser-compatible playback file for an evidence video clip.
     If the original clip is already browser-compatible H.264 MP4, returns original_clip_path.
     If not, checks for existing playback file in storage/evidence_playback/.
-    If none, transcodes once to H.264 (yuv420p + AAC + faststart).
+    If none, transcodes once to H.264 (yuv420p + AAC + faststart) with memory bounds.
     """
     if not original_clip_path.exists():
         raise PlaybackNotFoundError(f"Original evidence clip for '{evidence_id}' not found.")
@@ -362,6 +544,24 @@ def ensure_evidence_clip_playback(evidence_id: str, original_clip_path: Path) ->
         if playback_file.exists() and playback_file.stat().st_size > 0:
             return playback_file
 
+        if is_heavy_analysis_active():
+            raise PlaybackMemoryPressureError(
+                "Video analysis is currently in progress. Evidence clip transcoding deferred."
+            )
+
+        gc.collect()
+        headroom = get_container_memory_headroom_mb()
+        if headroom < 120.0:
+            raise PlaybackMemoryPressureError(
+                f"Container memory headroom ({headroom:.1f} MB) is below the safety threshold (120 MB)."
+            )
+
+        slot_acquired = try_acquire_heavy_processing_slot()
+        if not slot_acquired:
+            raise PlaybackMemoryPressureError(
+                "Another heavy background process is active. Evidence clip transcoding deferred."
+            )
+
         with _master_lock:
             _in_progress_evidence_conversions.add(evidence_id)
 
@@ -370,6 +570,7 @@ def ensure_evidence_clip_playback(evidence_id: str, original_clip_path: Path) ->
         finally:
             with _master_lock:
                 _in_progress_evidence_conversions.discard(evidence_id)
+            release_heavy_processing_slot()
 
 
 def get_evidence_playback_status(evidence_id: str, original_clip_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -408,6 +609,24 @@ def get_evidence_playback_status(evidence_id: str, original_clip_path: Optional[
                 "message": "Native browser playback compatible.",
             }
         else:
+            headroom = get_container_memory_headroom_mb()
+            if is_heavy_analysis_active():
+                return {
+                    "evidence_id": evidence_id,
+                    "status": "deferred",
+                    "is_compatible": False,
+                    "is_transcoded": False,
+                    "message": "Video analysis in progress. Evidence conversion deferred to protect memory bounds.",
+                }
+            if headroom < 120.0:
+                return {
+                    "evidence_id": evidence_id,
+                    "status": "deferred",
+                    "is_compatible": False,
+                    "is_transcoded": False,
+                    "message": f"Evidence clip conversion deferred to protect container memory (headroom: {headroom:.1f} MB < 120 MB).",
+                }
+
             return {
                 "evidence_id": evidence_id,
                 "status": "needs_conversion",
