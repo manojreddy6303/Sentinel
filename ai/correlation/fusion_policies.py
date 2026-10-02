@@ -47,6 +47,8 @@ class VehicleCorrelationPolicy:
         candidates: List[IncidentCandidate],
         video_id: str,
         relationships: List[ObservationalRelationship],
+        sampling_aware: bool = False,
+        temporal_cooldown_s: float = 5.0,
     ) -> List[CorrelatedIncident]:
         veh_cands = [
             c for c in candidates
@@ -267,52 +269,166 @@ class VehicleCorrelationPolicy:
             correlated.append(ci)
 
         # 3. Remaining unabsorbed vehicle candidates (e.g. independent trajectory anomalies or stops)
-        for cand in other_veh:
-            if cand.incident_id not in absorbed_cands:
-                val_dec = cand.validation_decision
-                score = cand.confidence
-                if str(val_dec).upper() in ("REVIEW_REQUIRED", "VALIDATIONDECISION.REVIEW_REQUIRED", "HYPOTHESISOUTCOME.REVIEW_REQUIRED"):
-                    score = min(score, 0.65)
+        if sampling_aware:
+            unabsorbed_veh = [c for c in other_veh if c.incident_id not in absorbed_cands]
+            veh_clusters: List[List[IncidentCandidate]] = []
+            for cand in sorted(unabsorbed_veh, key=lambda c: c.start_time):
+                placed = False
+                for cluster in veh_clusters:
+                    cluster_tracks = set(sum([c.track_ids for c in cluster], []))
+                    shared_tracks = bool(cluster_tracks & set(cand.track_ids))
+                    c_start = min(c.start_time for c in cluster)
+                    c_end = max(c.end_time for c in cluster)
+                    t_gap = max(0.0, max(c_start, cand.start_time) - min(c_end, cand.end_time))
+                    if shared_tracks and t_gap <= temporal_cooldown_s:
+                        cluster.append(cand)
+                        placed = True
+                        break
+                if not placed:
+                    veh_clusters.append([cand])
 
-                ci = CorrelatedIncident(
-                    incident_id=f"CORR-VEH-{uuid.uuid4().hex[:8]}",
-                    video_id=video_id,
-                    incident_category="vehicle",
-                    incident_subcategory=cand.event_type.lower(),
-                    start_time=cand.start_time,
-                    end_time=cand.end_time,
-                    duration=cand.duration,
-                    severity=cand.severity,
-                    confidence=score,
-                    assessment_score=score,
-                    evidence_strength=score * 0.8,
-                    pattern_evidence_strength=getattr(cand, "pattern_evidence_strength", cand.confidence),
-                    reliability_rating="HIGH" if score >= 0.80 else "MODERATE",
-                    validation_decision=val_dec,
-                    primary_track_ids=cand.track_ids,
-                    involved_object_classes=cand.object_classes,
-                    source_candidate_ids=[cand.incident_id],
-                    source_detector_ids=[cand.detector_name],
-                    supporting_signals=[s.to_dict() for s in cand.supporting_signals],
-                    relationships=[],
-                    storyline=IncidentStorylineGenerator.generate_storyline(
-                        category="vehicle",
-                        subcategory=cand.event_type.lower(),
+            for cluster in veh_clusters:
+                if len(cluster) == 1:
+                    cand = cluster[0]
+                    val_dec = cand.validation_decision
+                    score = cand.confidence
+                    if str(val_dec).upper() in ("REVIEW_REQUIRED", "VALIDATIONDECISION.REVIEW_REQUIRED", "HYPOTHESISOUTCOME.REVIEW_REQUIRED"):
+                        score = min(score, 0.65)
+
+                    ci = CorrelatedIncident(
+                        incident_id=f"CORR-VEH-{uuid.uuid4().hex[:8]}",
+                        video_id=video_id,
+                        incident_category="vehicle",
+                        incident_subcategory=cand.event_type.lower(),
                         start_time=cand.start_time,
                         end_time=cand.end_time,
                         duration=cand.duration,
-                        primary_tracks=cand.track_ids,
-                        supporting_tracks=[],
-                        object_classes=cand.object_classes,
-                        relationships=[],
-                        supporting_signals=[s.to_dict() for s in cand.supporting_signals],
+                        severity=cand.severity,
                         confidence=score,
+                        assessment_score=score,
+                        evidence_strength=score * 0.8,
+                        pattern_evidence_strength=getattr(cand, "pattern_evidence_strength", cand.confidence),
+                        reliability_rating="HIGH" if score >= 0.80 else "MODERATE",
                         validation_decision=val_dec,
-                    ),
-                )
-                correlated.append(ci)
+                        primary_track_ids=cand.track_ids,
+                        involved_object_classes=cand.object_classes,
+                        source_candidate_ids=[cand.incident_id],
+                        source_detector_ids=[cand.detector_name],
+                        supporting_signals=[s.to_dict() for s in cand.supporting_signals],
+                        relationships=[],
+                        storyline=IncidentStorylineGenerator.generate_storyline(
+                            category="vehicle",
+                            subcategory=cand.event_type.lower(),
+                            start_time=cand.start_time,
+                            end_time=cand.end_time,
+                            duration=cand.duration,
+                            primary_tracks=cand.track_ids,
+                            supporting_tracks=[],
+                            object_classes=cand.object_classes,
+                            relationships=[],
+                            supporting_signals=[s.to_dict() for s in cand.supporting_signals],
+                            confidence=score,
+                            validation_decision=val_dec,
+                        ),
+                    )
+                    correlated.append(ci)
+                else:
+                    lead = max(cluster, key=lambda c: c.confidence)
+                    start_t = min(c.start_time for c in cluster)
+                    end_t = max(c.end_time for c in cluster)
+                    dur = max(0.0, end_t - start_t)
+                    val_dec = inherit_validation_decision(cluster)
+                    score = max(c.confidence for c in cluster)
+                    if val_dec == "REVIEW_REQUIRED":
+                        score = min(score, 0.65)
+                    all_tracks = list(set(sum([c.track_ids for c in cluster], [])))
+                    all_classes = list(set(sum([c.object_classes for c in cluster], [])))
+                    all_signals = [s.to_dict() for c in cluster for s in c.supporting_signals]
+                    ci = CorrelatedIncident(
+                        incident_id=f"CORR-VEH-EPISODE-{uuid.uuid4().hex[:8]}",
+                        video_id=video_id,
+                        incident_category="vehicle",
+                        incident_subcategory=lead.event_type.lower(),
+                        start_time=start_t,
+                        end_time=end_t,
+                        duration=dur,
+                        severity=lead.severity,
+                        confidence=score,
+                        assessment_score=score,
+                        evidence_strength=score * 0.8,
+                        pattern_evidence_strength=getattr(lead, "pattern_evidence_strength", score),
+                        reliability_rating="HIGH" if score >= 0.80 else "MODERATE",
+                        validation_decision=val_dec,
+                        primary_track_ids=all_tracks,
+                        involved_object_classes=all_classes,
+                        source_candidate_ids=[c.incident_id for c in cluster],
+                        source_detector_ids=list(set(c.detector_name for c in cluster)),
+                        supporting_signals=all_signals[:10],
+                        relationships=[],
+                        storyline=IncidentStorylineGenerator.generate_storyline(
+                            category="vehicle",
+                            subcategory=lead.event_type.lower(),
+                            start_time=start_t,
+                            end_time=end_t,
+                            duration=dur,
+                            primary_tracks=all_tracks,
+                            supporting_tracks=[],
+                            object_classes=all_classes,
+                            relationships=[],
+                            supporting_signals=all_signals,
+                            confidence=score,
+                            validation_decision=val_dec,
+                        ),
+                    )
+                    correlated.append(ci)
+        else:
+            for cand in other_veh:
+                if cand.incident_id not in absorbed_cands:
+                    val_dec = cand.validation_decision
+                    score = cand.confidence
+                    if str(val_dec).upper() in ("REVIEW_REQUIRED", "VALIDATIONDECISION.REVIEW_REQUIRED", "HYPOTHESISOUTCOME.REVIEW_REQUIRED"):
+                        score = min(score, 0.65)
+
+                    ci = CorrelatedIncident(
+                        incident_id=f"CORR-VEH-{uuid.uuid4().hex[:8]}",
+                        video_id=video_id,
+                        incident_category="vehicle",
+                        incident_subcategory=cand.event_type.lower(),
+                        start_time=cand.start_time,
+                        end_time=cand.end_time,
+                        duration=cand.duration,
+                        severity=cand.severity,
+                        confidence=score,
+                        assessment_score=score,
+                        evidence_strength=score * 0.8,
+                        pattern_evidence_strength=getattr(cand, "pattern_evidence_strength", cand.confidence),
+                        reliability_rating="HIGH" if score >= 0.80 else "MODERATE",
+                        validation_decision=val_dec,
+                        primary_track_ids=cand.track_ids,
+                        involved_object_classes=cand.object_classes,
+                        source_candidate_ids=[cand.incident_id],
+                        source_detector_ids=[cand.detector_name],
+                        supporting_signals=[s.to_dict() for s in cand.supporting_signals],
+                        relationships=[],
+                        storyline=IncidentStorylineGenerator.generate_storyline(
+                            category="vehicle",
+                            subcategory=cand.event_type.lower(),
+                            start_time=cand.start_time,
+                            end_time=cand.end_time,
+                            duration=cand.duration,
+                            primary_tracks=cand.track_ids,
+                            supporting_tracks=[],
+                            object_classes=cand.object_classes,
+                            relationships=[],
+                            supporting_signals=[s.to_dict() for s in cand.supporting_signals],
+                            confidence=score,
+                            validation_decision=val_dec,
+                        ),
+                    )
+                    correlated.append(ci)
 
         return correlated
+
 
 
 class PropertyCorrelationPolicy:
@@ -473,6 +589,8 @@ class PersonCorrelationPolicy:
         candidates: List[IncidentCandidate],
         video_id: str,
         relationships: List[ObservationalRelationship],
+        sampling_aware: bool = False,
+        temporal_cooldown_s: float = 5.0,
     ) -> List[CorrelatedIncident]:
         person_cands = [c for c in candidates if c.category == "person"]
         if not person_cands:
@@ -536,55 +654,220 @@ class PersonCorrelationPolicy:
             )
             correlated.append(ci)
 
-        for op in other_person:
-            val_dec = inherit_validation_decision([op])
-            score = op.confidence
-            pattern_str = getattr(op, "pattern_evidence_strength", op.confidence)
-            if val_dec == "REVIEW_REQUIRED":
-                score = min(score, 0.65)
-                rel_rating = "MODERATE"
-                ev_str = min(score * 0.8, 0.65)
-            else:
-                rel_rating = "HIGH" if score >= 0.80 else "MODERATE"
-                ev_str = score * 0.8
-            ci = CorrelatedIncident(
-                incident_id=f"CORR-PERS-{uuid.uuid4().hex[:8]}",
-                video_id=video_id,
-                incident_category="person",
-                incident_subcategory=op.event_type.lower(),
-                start_time=op.start_time,
-                end_time=op.end_time,
-                duration=op.duration,
-                severity=op.severity,
-                confidence=score,
-                assessment_score=score,
-                evidence_strength=ev_str,
-                pattern_evidence_strength=pattern_str,
-                reliability_rating=rel_rating,
-                validation_decision=val_dec,
-                primary_track_ids=op.track_ids,
-                involved_object_classes=op.object_classes,
-                source_candidate_ids=[op.incident_id],
-                source_detector_ids=[op.detector_name],
-                supporting_signals=[s.to_dict() for s in op.supporting_signals],
-                storyline=IncidentStorylineGenerator.generate_storyline(
-                    category="person",
-                    subcategory=op.event_type.lower(),
+        if not sampling_aware:
+            # LEGACY EXACT PATH: emit 1-to-1 standalone incident per candidate
+            for op in other_person:
+                val_dec = inherit_validation_decision([op])
+                score = op.confidence
+                pattern_str = getattr(op, "pattern_evidence_strength", op.confidence)
+                if val_dec == "REVIEW_REQUIRED":
+                    score = min(score, 0.65)
+                    rel_rating = "MODERATE"
+                    ev_str = min(score * 0.8, 0.65)
+                else:
+                    rel_rating = "HIGH" if score >= 0.80 else "MODERATE"
+                    ev_str = score * 0.8
+                ci = CorrelatedIncident(
+                    incident_id=f"CORR-PERS-{uuid.uuid4().hex[:8]}",
+                    video_id=video_id,
+                    incident_category="person",
+                    incident_subcategory=op.event_type.lower(),
                     start_time=op.start_time,
                     end_time=op.end_time,
                     duration=op.duration,
-                    primary_tracks=op.track_ids,
-                    supporting_tracks=[],
-                    object_classes=op.object_classes,
-                    relationships=[],
+                    severity=op.severity,
+                    confidence=score,
+                    assessment_score=score,
+                    evidence_strength=ev_str,
+                    pattern_evidence_strength=pattern_str,
+                    reliability_rating=rel_rating,
+                    validation_decision=val_dec,
+                    primary_track_ids=op.track_ids,
+                    involved_object_classes=op.object_classes,
+                    source_candidate_ids=[op.incident_id],
+                    source_detector_ids=[op.detector_name],
                     supporting_signals=[s.to_dict() for s in op.supporting_signals],
+                    storyline=IncidentStorylineGenerator.generate_storyline(
+                        category="person",
+                        subcategory=op.event_type.lower(),
+                        start_time=op.start_time,
+                        end_time=op.end_time,
+                        duration=op.duration,
+                        primary_tracks=op.track_ids,
+                        supporting_tracks=[],
+                        object_classes=op.object_classes,
+                        relationships=[],
+                        supporting_signals=[s.to_dict() for s in op.supporting_signals],
+                        confidence=score,
+                        validation_decision=val_dec,
+                    ),
+                )
+                correlated.append(ci)
+            return correlated
+
+        # SAMPLING-AWARE CORRELATION PATH
+        # Cluster person candidates by shared track / spatial continuity and temporal envelope
+        person_clusters: List[List[IncidentCandidate]] = []
+        for op in sorted(other_person, key=lambda c: c.start_time):
+            placed = False
+            for cluster in person_clusters:
+                cluster_tracks = set(sum([c.track_ids for c in cluster], []))
+                shared_tracks = bool(cluster_tracks & set(op.track_ids))
+
+                spatial_near = False
+                if not shared_tracks and op.spatial_context and op.spatial_context.centroid:
+                    for c in cluster:
+                        if c.spatial_context and c.spatial_context.centroid:
+                            d = CorrelationSpatialEngine.point_distance(
+                                op.spatial_context.centroid,
+                                c.spatial_context.centroid,
+                            )
+                            if d <= 120.0:
+                                spatial_near = True
+                                break
+
+                # Temporal continuity against the cluster envelope
+                cluster_start = min(c.start_time for c in cluster)
+                cluster_end = max(c.end_time for c in cluster)
+                t_gap = max(0.0, max(cluster_start, op.start_time) - min(cluster_end, op.end_time))
+
+                if (shared_tracks or spatial_near) and t_gap <= temporal_cooldown_s:
+                    cluster.append(op)
+                    placed = True
+                    break
+
+            if not placed:
+                person_clusters.append([op])
+
+        priority_rank = {
+            "POTENTIAL_PHYSICAL_ALTERCATION": 10,
+            "POTENTIAL_FORCED_MOVEMENT": 9,
+            "COORDINATED_PERSON_MOVEMENT": 8,
+            "PERSON_FOLLOWING": 7,
+            "PANIC_RUNNING": 6,
+            "UNUSUAL_RAPID_PERSON_MOVEMENT": 5,
+            "PROLONGED_PRESENCE": 4,
+            "SUSPICIOUS_LOITERING": 3,
+        }
+
+        for cluster in person_clusters:
+            if len(cluster) == 1:
+                op = cluster[0]
+                val_dec = inherit_validation_decision([op])
+                score = op.confidence
+                pattern_str = getattr(op, "pattern_evidence_strength", op.confidence)
+                if val_dec == "REVIEW_REQUIRED":
+                    score = min(score, 0.65)
+                    rel_rating = "MODERATE"
+                    ev_str = min(score * 0.8, 0.65)
+                else:
+                    rel_rating = "HIGH" if score >= 0.80 else "MODERATE"
+                    ev_str = score * 0.8
+                ci = CorrelatedIncident(
+                    incident_id=f"CORR-PERS-{uuid.uuid4().hex[:8]}",
+                    video_id=video_id,
+                    incident_category="person",
+                    incident_subcategory=op.event_type.lower(),
+                    start_time=op.start_time,
+                    end_time=op.end_time,
+                    duration=op.duration,
+                    severity=op.severity,
+                    confidence=score,
+                    assessment_score=score,
+                    evidence_strength=ev_str,
+                    pattern_evidence_strength=pattern_str,
+                    reliability_rating=rel_rating,
+                    validation_decision=val_dec,
+                    primary_track_ids=op.track_ids,
+                    involved_object_classes=op.object_classes,
+                    source_candidate_ids=[op.incident_id],
+                    source_detector_ids=[op.detector_name],
+                    supporting_signals=[s.to_dict() for s in op.supporting_signals],
+                    storyline=IncidentStorylineGenerator.generate_storyline(
+                        category="person",
+                        subcategory=op.event_type.lower(),
+                        start_time=op.start_time,
+                        end_time=op.end_time,
+                        duration=op.duration,
+                        primary_tracks=op.track_ids,
+                        supporting_tracks=[],
+                        object_classes=op.object_classes,
+                        relationships=[],
+                        supporting_signals=[s.to_dict() for s in op.supporting_signals],
+                        confidence=score,
+                        validation_decision=val_dec,
+                    ),
+                )
+                correlated.append(ci)
+            else:
+                # Merge multi-segment continuous person interaction episode
+                lead = max(cluster, key=lambda c: (priority_rank.get(c.event_type, 1), c.confidence))
+                start_t = min(c.start_time for c in cluster)
+                end_t = max(c.end_time for c in cluster)
+                dur = max(0.0, end_t - start_t)
+                val_dec = inherit_validation_decision(cluster)
+                score = max(c.confidence for c in cluster)
+                if val_dec == "REVIEW_REQUIRED":
+                    score = min(score, 0.65)
+                    rel_rating = "MODERATE"
+                    ev_str = min(score * 0.85, 0.65)
+                else:
+                    rel_rating = "HIGH" if score >= 0.80 else "MODERATE"
+                    ev_str = score * 0.85
+
+                all_tracks = list(set(sum([c.track_ids for c in cluster], [])))
+                primary_tracks = lead.track_ids if lead.track_ids else all_tracks[:2]
+                supp_tracks = [t for t in all_tracks if t not in primary_tracks]
+                all_classes = list(set(sum([c.object_classes for c in cluster], [])))
+                all_signals = [s.to_dict() for c in cluster for s in c.supporting_signals]
+                all_cand_ids = [c.incident_id for c in cluster]
+                all_dets = list(set(c.detector_name for c in cluster))
+                pattern_str = max([getattr(c, "pattern_evidence_strength", getattr(c, "confidence", 0.0)) for c in cluster] + [score])
+
+                subcat = lead.event_type.lower()
+                storyline = IncidentStorylineGenerator.generate_storyline(
+                    category="person",
+                    subcategory=subcat,
+                    start_time=start_t,
+                    end_time=end_t,
+                    duration=dur,
+                    primary_tracks=primary_tracks,
+                    supporting_tracks=supp_tracks,
+                    object_classes=all_classes,
+                    relationships=[],
+                    supporting_signals=all_signals,
                     confidence=score,
                     validation_decision=val_dec,
-                ),
-            )
-            correlated.append(ci)
+                )
+
+                ci = CorrelatedIncident(
+                    incident_id=f"CORR-PERS-EPISODE-{uuid.uuid4().hex[:8]}",
+                    video_id=video_id,
+                    incident_category="person",
+                    incident_subcategory=subcat,
+                    start_time=start_t,
+                    end_time=end_t,
+                    duration=dur,
+                    severity=lead.severity,
+                    confidence=score,
+                    assessment_score=score,
+                    evidence_strength=ev_str,
+                    pattern_evidence_strength=pattern_str,
+                    reliability_rating=rel_rating,
+                    validation_decision=val_dec,
+                    primary_track_ids=primary_tracks,
+                    supporting_track_ids=supp_tracks,
+                    involved_object_classes=all_classes,
+                    source_candidate_ids=all_cand_ids,
+                    source_detector_ids=all_dets,
+                    supporting_signals=all_signals[:15],
+                    storyline=storyline,
+                    provenance_graph={"fused_events": [c.event_type for c in cluster], "segment_count": len(cluster)},
+                )
+                correlated.append(ci)
 
         return correlated
+
 
 
 class CrowdZoneCorrelationPolicy:

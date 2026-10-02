@@ -32,9 +32,16 @@ class AdvancedIncidentCorrelationEngine:
     and incident storyline generation across Sentinel surveillance data.
     """
 
-    def __init__(self, proximity_threshold: float = 120.0):
+    def __init__(
+        self,
+        proximity_threshold: float = 120.0,
+        sampling_aware: Optional[bool] = None,
+        temporal_cooldown_seconds: Optional[float] = None,
+    ):
         self.relationship_graph = IncidentRelationshipGraph(proximity_threshold=proximity_threshold)
         self.arbitrator = CompetingHypothesisArbitrator()
+        self.sampling_aware = sampling_aware
+        self.temporal_cooldown_seconds = temporal_cooldown_seconds
 
     def correlate_incidents(
         self,
@@ -42,6 +49,9 @@ class AdvancedIncidentCorrelationEngine:
         candidates: List[IncidentCandidate],
         tracks: List[TrackedObject],
         fps: float = 30.0,
+        sample_rate_fps: Optional[float] = None,
+        sampling_aware: Optional[bool] = None,
+        temporal_cooldown_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Execute end-to-end incident correlation and storyline synthesis.
@@ -73,6 +83,29 @@ class AdvancedIncidentCorrelationEngine:
                 },
             }
 
+        # Resolve sampling-awareness flag and temporal cooldown threshold
+        if sampling_aware is not None:
+            is_sampling_aware = sampling_aware
+        elif self.sampling_aware is not None:
+            is_sampling_aware = self.sampling_aware
+        else:
+            try:
+                from backend.app.core.config import settings
+                is_sampling_aware = getattr(settings, "SAMPLING_AWARE_CORRELATION_ENABLED", False)
+            except Exception:
+                is_sampling_aware = False
+
+        if temporal_cooldown_seconds is not None:
+            cooldown_s = temporal_cooldown_seconds
+        elif self.temporal_cooldown_seconds is not None:
+            cooldown_s = self.temporal_cooldown_seconds
+        else:
+            try:
+                from backend.app.core.config import settings
+                cooldown_s = getattr(settings, "CORRELATION_TEMPORAL_COOLDOWN_SECONDS", 5.0)
+            except Exception:
+                cooldown_s = 5.0
+
         # 1. Derive pairwise observational relationships
         relationships = self.relationship_graph.build_track_relationships(tracks, fps=fps)
 
@@ -90,9 +123,21 @@ class AdvancedIncidentCorrelationEngine:
         superseded_candidates = [cand for cand, outcome, _ in arbitrated_tuples if outcome == HypothesisOutcome.SUPERSEDED]
 
         # 3. Apply domain fusion policies
-        correlated_veh = VehicleCorrelationPolicy.correlate(accepted_candidates, video_id, relationships)
+        correlated_veh = VehicleCorrelationPolicy.correlate(
+            accepted_candidates,
+            video_id,
+            relationships,
+            sampling_aware=is_sampling_aware,
+            temporal_cooldown_s=cooldown_s,
+        )
         correlated_prop = PropertyCorrelationPolicy.correlate(accepted_candidates, video_id, relationships)
-        correlated_pers = PersonCorrelationPolicy.correlate(accepted_candidates, video_id, relationships)
+        correlated_pers = PersonCorrelationPolicy.correlate(
+            accepted_candidates,
+            video_id,
+            relationships,
+            sampling_aware=is_sampling_aware,
+            temporal_cooldown_s=cooldown_s,
+        )
         correlated_crwd = CrowdZoneCorrelationPolicy.correlate(accepted_candidates, video_id, relationships)
         correlated_spec = SpecializedVisualPolicy.correlate(accepted_candidates, video_id, relationships)
 
@@ -105,9 +150,94 @@ class AdvancedIncidentCorrelationEngine:
                 absorbed_candidate_ids.add(cid)
 
         # 4. Wrap any remaining unabsorbed accepted candidates into CorrelatedIncident format
+        unabsorbed_candidates = [cand for cand in accepted_candidates if cand.incident_id not in absorbed_candidate_ids]
         standalone_correlated: List[CorrelatedIncident] = []
-        for cand in accepted_candidates:
-            if cand.incident_id not in absorbed_candidate_ids:
+
+        if is_sampling_aware and len(unabsorbed_candidates) > 1:
+            # Cluster unabsorbed candidates sharing tracks/spatial proximity within cooldown
+            unabsorbed_clusters: List[List[IncidentCandidate]] = []
+            for cand in sorted(unabsorbed_candidates, key=lambda c: c.start_time):
+                placed = False
+                for cluster in unabsorbed_clusters:
+                    cluster_tracks = set(sum([c.track_ids for c in cluster], []))
+                    shared_tracks = bool(cluster_tracks & set(cand.track_ids))
+                    same_category = all(c.category == cand.category for c in cluster)
+                    c_start = min(c.start_time for c in cluster)
+                    c_end = max(c.end_time for c in cluster)
+                    t_gap = max(0.0, max(c_start, cand.start_time) - min(c_end, cand.end_time))
+                    if shared_tracks and same_category and t_gap <= cooldown_s:
+                        cluster.append(cand)
+                        placed = True
+                        break
+                if not placed:
+                    unabsorbed_clusters.append([cand])
+
+            for cluster in unabsorbed_clusters:
+                lead = cluster[0]
+                matched_rels = [
+                    r for r in relationships
+                    if any(t in (r.subject_track_id, r.target_track_id) for t in lead.track_ids)
+                ]
+                val_dec = "REVIEW_REQUIRED" if any(
+                    str(c.validation_decision).upper() in ("REVIEW_REQUIRED", "VALIDATIONDECISION.REVIEW_REQUIRED", "HYPOTHESISOUTCOME.REVIEW_REQUIRED")
+                    for c in cluster
+                ) else "ACCEPTED"
+                score = max(c.confidence for c in cluster)
+                if val_dec == "REVIEW_REQUIRED":
+                    score = min(score, 0.65)
+                    rel_rating = "MODERATE"
+                    ev_str = min(score * 0.9, 0.65)
+                else:
+                    rel_rating = "HIGH" if score >= 0.80 else "MODERATE"
+                    ev_str = score * 0.9
+
+                start_t = min(c.start_time for c in cluster)
+                end_t = max(c.end_time for c in cluster)
+                dur = max(0.0, end_t - start_t)
+                all_tracks = list(set(sum([c.track_ids for c in cluster], [])))
+                all_classes = list(set(sum([c.object_classes for c in cluster], [])))
+                all_signals = [s.to_dict() for c in cluster for s in c.supporting_signals]
+
+                storyline = IncidentStorylineGenerator.generate_storyline(
+                    category=lead.category,
+                    subcategory=lead.event_type.lower(),
+                    start_time=start_t,
+                    end_time=end_t,
+                    duration=dur,
+                    primary_tracks=all_tracks,
+                    supporting_tracks=[],
+                    object_classes=all_classes,
+                    relationships=matched_rels,
+                    supporting_signals=all_signals,
+                    confidence=score,
+                    validation_decision=val_dec,
+                )
+                ci = CorrelatedIncident(
+                    incident_id=f"CORR-{lead.incident_id[:8]}",
+                    video_id=video_id,
+                    incident_category=lead.category,
+                    incident_subcategory=lead.event_type.lower(),
+                    start_time=start_t,
+                    end_time=end_t,
+                    duration=dur,
+                    severity=lead.severity,
+                    confidence=score,
+                    assessment_score=score,
+                    evidence_strength=ev_str,
+                    reliability_rating=rel_rating,
+                    validation_decision=val_dec,
+                    primary_track_ids=all_tracks,
+                    involved_object_classes=all_classes,
+                    source_candidate_ids=[c.incident_id for c in cluster],
+                    source_detector_ids=list(set(c.detector_name for c in cluster)),
+                    supporting_signals=all_signals[:10],
+                    relationships=matched_rels,
+                    storyline=storyline,
+                    provenance_graph={"source_event_type": lead.event_type, "segment_count": len(cluster)},
+                )
+                standalone_correlated.append(ci)
+        else:
+            for cand in unabsorbed_candidates:
                 matched_rels = [
                     r for r in relationships
                     if any(t in (r.subject_track_id, r.target_track_id) for t in cand.track_ids)
@@ -161,6 +291,7 @@ class AdvancedIncidentCorrelationEngine:
                     provenance_graph={"source_event_type": cand.event_type},
                 )
                 standalone_correlated.append(ci)
+
 
         all_correlated = fused_correlated + standalone_correlated
         all_correlated.sort(key=lambda c: c.start_time)

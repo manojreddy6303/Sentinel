@@ -160,9 +160,17 @@ class ObjectTracker:
         detections: List[Dict[str, Any]],
         frame_width: Optional[float] = None,
         frame_height: Optional[float] = None,
+        frame_bgr: Optional[Any] = None,
     ) -> List[TrackedObject]:
         """
         Update tracks with detections from the current frame using ByteTrack two-stage matching.
+
+        Args:
+            timestamp: current frame timestamp in seconds
+            detections: list of detection dicts
+            frame_width: frame width in pixels (for distance normalization)
+            frame_height: frame height in pixels (for distance normalization)
+            frame_bgr: raw BGR frame (unused by ByteTrack — accepted for interface compatibility)
         """
         # Filter detections for trackable surveillance classes
         current_dets: List[Tuple[str, float, BoundingBox, Dict[str, Any]]] = []

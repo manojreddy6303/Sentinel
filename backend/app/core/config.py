@@ -241,5 +241,26 @@ class Settings:
     # Default = 2 (prevents thread-local memory explosion on multi-core host nodes).
     TORCH_NUM_THREADS: int = int(os.getenv("TORCH_NUM_THREADS", os.getenv("OMP_NUM_THREADS", "2")))
 
+    # -------------------------------------------------------------------------
+    # Phase 21A: Advanced Tracking Configuration
+    # -------------------------------------------------------------------------
+    # Tracker selection: "bytetrack" (production default) or "botsort" (Phase 21A candidate).
+    # BoT-SORT is NOT the production default — it remains a benchmark candidate.
+    TRACKER_TYPE: str = os.getenv("TRACKER_TYPE", "bytetrack")
+
+    # -------------------------------------------------------------------------
+    # Phase 21D: Sampling-Aware Incident Correlation Configuration
+    # -------------------------------------------------------------------------
+    # Controls whether the incident correlation layer uses sampling-density-aware
+    # temporal episode continuity (True) or legacy fixed-interval correlation (False).
+    # Default = False (preserves exact 1.0 FPS production baseline behavior).
+    SAMPLING_AWARE_CORRELATION_ENABLED: bool = os.getenv(
+        "SAMPLING_AWARE_CORRELATION_ENABLED", "0"
+    ).strip().lower() in ("1", "true", "yes")
+    CORRELATION_TEMPORAL_COOLDOWN_SECONDS: float = float(
+        os.getenv("CORRELATION_TEMPORAL_COOLDOWN_SECONDS", "5.0")
+    )
+
 
 settings = Settings()
+

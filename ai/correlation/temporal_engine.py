@@ -86,3 +86,52 @@ class CorrelationTemporalEngine:
         max_e = max(ensure_finite(e, 0.0) for s, e in intervals)
         dur = max(0.0, max_e - min_s)
         return min_s, max_e, dur
+
+    @staticmethod
+    def calculate_temporal_gap(
+        start_a: float,
+        end_a: float,
+        start_b: float,
+        end_b: float,
+    ) -> float:
+        """
+        Computes absolute temporal gap between two intervals in seconds.
+        Returns 0.0 if intervals overlap.
+        """
+        s_a = ensure_finite(start_a, 0.0)
+        e_a = max(s_a, ensure_finite(end_a, s_a))
+        s_b = ensure_finite(start_b, 0.0)
+        e_b = max(s_b, ensure_finite(end_b, s_b))
+
+        # Check overlap
+        if not (e_a < s_b or e_b < s_a):
+            return 0.0
+
+        if e_a < s_b:
+            return s_b - e_a
+        return s_a - e_b
+
+    @classmethod
+    def is_temporally_continuous(
+        cls,
+        start_a: float,
+        end_a: float,
+        start_b: float,
+        end_b: float,
+        max_gap_seconds: float = 5.0,
+    ) -> bool:
+        """
+        Evaluates whether two intervals are temporally contiguous or overlapping within max_gap_seconds.
+        Guarantees that observation density does not fragment continuous episodes.
+        """
+        gap = cls.calculate_temporal_gap(start_a, end_a, start_b, end_b)
+        return gap <= max_gap_seconds
+
+    @staticmethod
+    def adaptive_temporal_gap(sample_rate_fps: float = 1.0, baseline_gap: float = 5.0) -> float:
+        """
+        Principled temporal gap calculation invariant to sampling rate.
+        Maintains constant real-time interval semantics across 1 FPS, 3 FPS, and VFR streams.
+        """
+        return float(baseline_gap)
+

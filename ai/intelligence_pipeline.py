@@ -74,6 +74,7 @@ class SecurityIntelligencePipeline:
         specialized_registry: Optional[SpecializedDetectorRegistry] = None,
         episode_aggregator: Optional[SpecializedVisualEpisodeAggregator] = None,
         specialized_validator: Optional[SpecializedValidationEngine] = None,
+        sampling_aware_correlation: Optional[bool] = None,
     ):
         self.tracker = tracker or ObjectTracker()
         self.color_analyzer = color_analyzer or VehicleColorAnalyzer()
@@ -83,7 +84,11 @@ class SecurityIntelligencePipeline:
         self.activity_analyzer = activity_analyzer or ActivityAnalyzer()
         self.behavior_analyzer = behavior_analyzer or BehaviorAnalyzer()
         self.incident_engine = incident_engine or IncidentIntelligenceEngine()
-        self.correlation_engine = correlation_engine or AdvancedIncidentCorrelationEngine()
+        self.sampling_aware_correlation = sampling_aware_correlation
+        if correlation_engine is not None:
+            self.correlation_engine = correlation_engine
+        else:
+            self.correlation_engine = AdvancedIncidentCorrelationEngine(sampling_aware=sampling_aware_correlation)
         self.specialized_registry = specialized_registry or get_specialized_registry()
         self.episode_aggregator = episode_aggregator or SpecializedVisualEpisodeAggregator()
         self.specialized_validator = specialized_validator or SpecializedValidationEngine()
@@ -109,6 +114,7 @@ class SecurityIntelligencePipeline:
         sampled_frames: Optional[Dict[float, np.ndarray]] = None,
         frame_width: Optional[float] = None,
         frame_height: Optional[float] = None,
+        sampling_aware_correlation: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Execute full security intelligence pipeline across a video and its raw detections.
@@ -189,14 +195,10 @@ class SecurityIntelligencePipeline:
                 d for d in frame_dets
                 if str(d.get("validation_status", "VALID")).upper() != "REJECTED"
             ]
-            active_tracks = self.tracker.update(
-                timestamp=t,
-                detections=valid_frame_dets,
-                frame_width=video_w,
-                frame_height=video_h,
-            )
 
-            # Retrieve frame image: from memory cache first, or sequential video stream
+            # Retrieve frame image BEFORE tracker update so GMC-capable trackers
+            # (e.g., BoT-SORT) can use it for camera motion compensation.
+            # Frame retrieval depends only on timestamp, not tracker output.
             frame_bgr = None
             frame_idx = int(round(t * fps))
 
@@ -230,6 +232,14 @@ class SecurityIntelligencePipeline:
                     if ret and frame is not None:
                         frame_bgr = frame
                         current_cap_frame_idx = frame_idx
+
+            active_tracks = self.tracker.update(
+                timestamp=t,
+                detections=valid_frame_dets,
+                frame_width=video_w,
+                frame_height=video_h,
+                frame_bgr=frame_bgr,
+            )
 
             # Process vehicle colors, face crops, and specialized visual detections
             if frame_bgr is not None:
@@ -386,12 +396,19 @@ class SecurityIntelligencePipeline:
         incidents = incident_res["incidents"]
         diagnostics = incident_res["diagnostics"]
 
-        # Step 8: Phase 16 Advanced Incident Correlation, Fusion & Storylines
+        # Step 8: Phase 16 & 21D Advanced Incident Correlation, Fusion & Storylines
+        resolved_sampling_aware = (
+            sampling_aware_correlation
+            if sampling_aware_correlation is not None
+            else self.sampling_aware_correlation
+        )
         correlation_res = self.correlation_engine.correlate_incidents(
             video_id=video_id,
             candidates=incidents,
             tracks=validated_tracks,
             fps=fps,
+            sample_rate_fps=sample_rate_fps,
+            sampling_aware=resolved_sampling_aware,
         )
         correlated_incidents = correlation_res["correlated_incidents"]
         correlation_diagnostics = correlation_res["diagnostics"]

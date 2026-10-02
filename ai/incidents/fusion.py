@@ -31,16 +31,24 @@ class IncidentFusionEngine:
         self,
         time_merge_tolerance_seconds: float = 3.0,
         spatial_merge_distance: float = 120.0,
+        sampling_aware: bool = False,
     ):
         self.time_merge_tolerance_seconds = time_merge_tolerance_seconds
         self.spatial_merge_distance = spatial_merge_distance
+        self.sampling_aware = sampling_aware
 
-    def fuse_incidents(self, candidates: List[IncidentCandidate]) -> List[IncidentCandidate]:
+    def fuse_incidents(
+        self,
+        candidates: List[IncidentCandidate],
+        sampling_aware: Optional[bool] = None,
+    ) -> List[IncidentCandidate]:
         """
         Deduplicate and fuse raw candidates into cohesive incident records.
         """
         if not candidates:
             return []
+
+        is_sampling_aware = self.sampling_aware if sampling_aware is None else sampling_aware
 
         # 1. Arbitrate competing person interaction hypotheses on shared tracks
         candidates = self._arbitrate_competing_person_interactions(candidates)
@@ -73,28 +81,54 @@ class IncidentFusionEngine:
             for cand in sorted_group:
                 placed = False
                 for cluster in clusters:
-                    lead = cluster[0]
-                    # Check temporal overlap or close adjacency
-                    if TemporalAnalysisEngine.is_temporally_overlapping(
-                        lead.start_time, lead.end_time,
-                        cand.start_time, cand.end_time,
-                        tolerance_seconds=self.time_merge_tolerance_seconds
-                    ):
-                        # Check track intersection or spatial proximity
-                        shared_tracks = set(lead.track_ids).intersection(set(cand.track_ids))
+                    if is_sampling_aware:
+                        # Envelope-based temporal continuity check
+                        c_start = min(item.start_time for item in cluster)
+                        c_end = max(item.end_time for item in cluster)
+                        temporally_connected = (
+                            cand.start_time <= (c_end + self.time_merge_tolerance_seconds)
+                            and cand.end_time >= (c_start - self.time_merge_tolerance_seconds)
+                        )
+                        cluster_tracks = set(sum([item.track_ids for item in cluster], []))
+                        shared_tracks = bool(cluster_tracks.intersection(set(cand.track_ids)))
                         spatial_near = False
-                        if lead.spatial_context and cand.spatial_context:
-                            if lead.spatial_context.centroid and cand.spatial_context.centroid:
-                                d = SpatialRelationshipEngine.centroid_distance(
-                                    lead.spatial_context.centroid,
-                                    cand.spatial_context.centroid
-                                )
-                                spatial_near = (d <= self.spatial_merge_distance)
-
-                        if shared_tracks or spatial_near or not lead.track_ids:
+                        if cand.spatial_context and cand.spatial_context.centroid:
+                            for item in cluster:
+                                if item.spatial_context and item.spatial_context.centroid:
+                                    d = SpatialRelationshipEngine.centroid_distance(
+                                        item.spatial_context.centroid,
+                                        cand.spatial_context.centroid,
+                                    )
+                                    if d <= self.spatial_merge_distance:
+                                        spatial_near = True
+                                        break
+                        if temporally_connected and (shared_tracks or spatial_near or not cluster_tracks):
                             cluster.append(cand)
                             placed = True
                             break
+                    else:
+                        lead = cluster[0]
+                        # Check temporal overlap or close adjacency (legacy lead-only comparison)
+                        if TemporalAnalysisEngine.is_temporally_overlapping(
+                            lead.start_time, lead.end_time,
+                            cand.start_time, cand.end_time,
+                            tolerance_seconds=self.time_merge_tolerance_seconds
+                        ):
+                            # Check track intersection or spatial proximity
+                            shared_tracks = set(lead.track_ids).intersection(set(cand.track_ids))
+                            spatial_near = False
+                            if lead.spatial_context and cand.spatial_context:
+                                if lead.spatial_context.centroid and cand.spatial_context.centroid:
+                                    d = SpatialRelationshipEngine.centroid_distance(
+                                        lead.spatial_context.centroid,
+                                        cand.spatial_context.centroid
+                                    )
+                                    spatial_near = (d <= self.spatial_merge_distance)
+
+                            if shared_tracks or spatial_near or not lead.track_ids:
+                                cluster.append(cand)
+                                placed = True
+                                break
 
                 if not placed:
                     clusters.append([cand])

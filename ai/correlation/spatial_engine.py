@@ -55,6 +55,9 @@ class CorrelationSpatialEngine:
             return 999999.0
         return ensure_finite(math.hypot(c1[0] - c2[0], c1[1] - c2[1]), 999999.0)
 
+    point_distance = centroid_distance
+
+
     @staticmethod
     def are_spatially_proximate(
         b1: Any,

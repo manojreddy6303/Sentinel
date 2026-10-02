@@ -52,6 +52,7 @@ class BaseMultiObjectTracker(ABC):
         timestamp: float,
         frame_width: Optional[float] = None,
         frame_height: Optional[float] = None,
+        frame_bgr: Optional[np.ndarray] = None,
     ) -> List[TrackedObject]:
         """Update active tracks with current frame detections."""
         pass
@@ -159,13 +160,14 @@ class ByteTrackAdapter(BaseMultiObjectTracker):
         timestamp: float,
         frame_width: Optional[float] = None,
         frame_height: Optional[float] = None,
+        frame_bgr: Optional[np.ndarray] = None,
     ) -> List[TrackedObject]:
         return self.tracker.update(
-            detections,
-            frame_idx=frame_idx,
             timestamp=timestamp,
+            detections=detections,
             frame_width=frame_width,
             frame_height=frame_height,
+            frame_bgr=frame_bgr,
         )
 
     def finalize(self) -> List[TrackedObject]:
@@ -260,13 +262,33 @@ class SAM2BenchmarkCandidate(BaseObjectDetector):
 
 
 class BoTSORTBenchmarkCandidate(BaseMultiObjectTracker):
-    """Pluggable candidate for BoT-SORT camera-motion compensated tracking."""
+    """Adapter wrapping BoTSORTTracker for benchmark evaluation (Phase 21A)."""
 
-    def update(self, detections, frame_idx, timestamp, frame_width=None, frame_height=None):
-        raise NotImplementedError("BoT-SORT candidate: requires camera motion compensation module.")
+    def __init__(self, tracker=None):
+        if tracker is None:
+            from ai.tracking.botsort_tracker import BoTSORTTracker
+            tracker = BoTSORTTracker()
+        self.tracker = tracker
 
-    def finalize(self):
-        return []
+    def update(
+        self,
+        detections: List[Dict[str, Any]],
+        frame_idx: int,
+        timestamp: float,
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
+        frame_bgr: Optional[np.ndarray] = None,
+    ) -> List[TrackedObject]:
+        return self.tracker.update(
+            timestamp=timestamp,
+            detections=detections,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            frame_bgr=frame_bgr,
+        )
+
+    def finalize(self) -> List[TrackedObject]:
+        return self.tracker.finalize()
 
 
 class CLIPVisualAttributeBenchmarkCandidate(BaseVisualAttributeAnalyzer):
