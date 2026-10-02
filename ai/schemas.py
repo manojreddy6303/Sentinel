@@ -278,7 +278,13 @@ class ClothingColor:
 
     @property
     def is_confirmed(self) -> bool:
-        return self.observation_count >= 3 and not self.is_illumination_uncertain and self.confidence >= 0.60
+        if self.is_illumination_uncertain or self.color_name in ("unknown", "uncertain"):
+            return False
+        if self.observation_count >= 3 and self.confidence >= 0.45:
+            return True
+        if self.observation_count >= 2 and self.confidence >= 0.65:
+            return True
+        return False
 
     def to_dict(self) -> Dict[str, Any]:
         return {

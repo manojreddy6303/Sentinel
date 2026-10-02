@@ -47,6 +47,15 @@ class FireVisualDetector(BaseSpecializedDetector):
         self.model_path = os.environ.get("FIRE_MODEL_PATH") or self.config.get("model_path")
         self._custom_model = None
         self._use_cv_fallback = True
+        self._prev_frame_gray: Optional[np.ndarray] = None
+        self._prev_timestamp: Optional[float] = None
+        self._prev_candidates: List[Dict[str, Any]] = []
+
+    def reset(self) -> None:
+        """Reset temporal state across video transitions."""
+        self._prev_frame_gray = None
+        self._prev_timestamp = None
+        self._prev_candidates.clear()
 
     def initialize(self) -> bool:
         if self._is_initialized:
@@ -118,6 +127,7 @@ class FireVisualDetector(BaseSpecializedDetector):
 
         # Downsample large frames for performance if needed
         scale = 1.0
+        curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         work_frame = frame
         if max(h, w) > 960:
             scale = 960.0 / max(h, w)
@@ -186,10 +196,50 @@ class FireVisualDetector(BaseSpecializedDetector):
             if max_lum < 232.0:
                 continue
 
+            # Core saturation ratio check:
+            # Combustion flames possess an incandescent core occupying >= 8% of the flame area.
+            # Isolated specular highlights from overhead store lighting on glossy packaging cover < 5% of the patch.
+            roi_cleaned_mask = cleaned_mask[by:by+bh, bx:bx+bw]
+            flame_pixels = int(np.count_nonzero(roi_cleaned_mask))
+            core_pixels = int(np.count_nonzero((roi_cleaned_mask > 0) & (roi_val >= 235)))
+            core_ratio = core_pixels / max(1, flame_pixels)
+            is_specular = (core_ratio < 0.08)
+
+            # Specular reflection check on stationary merchandise/print:
+            # If peak luminance reached threshold solely due to pinpoint specular reflection (< 5% core ratio),
+            # reject as non-combustion reflective surface
+            if core_ratio < 0.05:
+                continue
+
             # Suppress static solid orange surfaces (safety vests, traffic cones, signs, posters)
             # Solid painted surfaces have low internal variance (std < 9.0) and high geometric compactness
             is_static_surface = (std_lum < 9.0 and circularity > 0.50) or (std_lum < 6.5)
             if is_static_surface:
+                continue
+
+            # Motion / Rigid Background Consistency check:
+            # Genuine combustion flames flicker and exhibit turbulent non-rigid fluid dynamics.
+            # Stationary store shelves, merchandise displays, posters, and signs move in rigid lockstep with camera motion.
+            is_rigid_bg = False
+            if self._prev_frame_gray is not None and self._prev_frame_gray.shape == curr_gray.shape:
+                try:
+                    px1 = max(0, int(orig_x1))
+                    py1 = max(0, int(orig_y1))
+                    px2 = min(w, int(orig_x2))
+                    py2 = min(h, int(orig_y2))
+                    if (px2 - px1) >= 8 and (py2 - py1) >= 8:
+                        p_prev = self._prev_frame_gray[py1:py2, px1:px2]
+                        p_curr = curr_gray[py1:py2, px1:px2]
+                        (dx_p, dy_p), r_p = cv2.phaseCorrelate(np.float32(p_prev), np.float32(p_curr))
+                        (dx_bg, dy_bg), r_bg = cv2.phaseCorrelate(np.float32(self._prev_frame_gray), np.float32(curr_gray))
+                        motion_diff = math.hypot(dx_p - dx_bg, dy_p - dy_bg)
+                        if motion_diff <= 1.5 and r_p >= 0.65:
+                            is_rigid_bg = True
+                except Exception:
+                    pass
+
+            if is_rigid_bg and core_ratio < 0.15:
+                # Stationary shelf / packaging moving purely with camera background motion
                 continue
 
             # Person clothing / accessory suppression:
@@ -266,11 +316,16 @@ class FireVisualDetector(BaseSpecializedDetector):
                     "std_luminance": round(std_lum, 1),
                     "circularity": round(circularity, 3),
                     "aspect_ratio": round(bw / max(1, bh), 2),
+                    "incandescent_core_ratio": round(core_ratio, 4),
+                    "is_specular_glare": is_specular,
+                    "is_rigid_background": is_rigid_bg,
                     "inference_source": "forensic_chromatic_rules",
                 },
             )
             observations.append(obs)
 
+        self._prev_frame_gray = curr_gray
+        self._prev_timestamp = timestamp
         return observations
 
     detect = detect_frame

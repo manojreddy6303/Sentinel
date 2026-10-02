@@ -67,25 +67,49 @@ def get_container_memory_headroom_mb() -> float:
     # 1. Check cgroup v2
     cg2_max = Path("/sys/fs/cgroup/memory.max")
     cg2_curr = Path("/sys/fs/cgroup/memory.current")
+    cg2_stat = Path("/sys/fs/cgroup/memory.stat")
     if cg2_max.exists() and cg2_curr.exists():
         try:
             val = cg2_max.read_text().strip()
             if val != "max":
                 max_bytes = int(val)
                 curr_bytes = int(cg2_curr.read_text().strip())
-                return max(0.0, (max_bytes - curr_bytes) / (1024 * 1024))
+                # In Linux cgroups, memory.current counts clean page cache (inactive_file)
+                # and reclaimable slab which the kernel reclaims before any OOM event.
+                reclaimable_bytes = 0
+                if cg2_stat.exists():
+                    try:
+                        for line in cg2_stat.read_text().splitlines():
+                            parts = line.strip().split()
+                            if len(parts) == 2 and parts[0] in ("inactive_file", "slab_reclaimable"):
+                                reclaimable_bytes += int(parts[1])
+                    except Exception:
+                        pass
+                effective_curr = max(0, curr_bytes - reclaimable_bytes)
+                return max(0.0, (max_bytes - effective_curr) / (1024 * 1024))
         except Exception:
             pass
 
     # 2. Check cgroup v1
     cg1_limit = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
     cg1_usage = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+    cg1_stat = Path("/sys/fs/cgroup/memory/memory.stat")
     if cg1_limit.exists() and cg1_usage.exists():
         try:
             limit_bytes = int(cg1_limit.read_text().strip())
             if limit_bytes < (1024 ** 4):
                 usage_bytes = int(cg1_usage.read_text().strip())
-                return max(0.0, (limit_bytes - usage_bytes) / (1024 * 1024))
+                reclaimable_bytes = 0
+                if cg1_stat.exists():
+                    try:
+                        for line in cg1_stat.read_text().splitlines():
+                            parts = line.strip().split()
+                            if len(parts) == 2 and parts[0] in ("total_inactive_file", "inactive_file"):
+                                reclaimable_bytes += int(parts[1])
+                    except Exception:
+                        pass
+                effective_usage = max(0, usage_bytes - reclaimable_bytes)
+                return max(0.0, (limit_bytes - effective_usage) / (1024 * 1024))
         except Exception:
             pass
 

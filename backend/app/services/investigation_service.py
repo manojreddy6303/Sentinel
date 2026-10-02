@@ -354,8 +354,38 @@ class InvestigationService:
             q = q.filter(TrackModel.color.ilike(target_color))
 
         rows = q.order_by(TrackModel.first_seen.asc()).all()
-        results = [
-            {
+        results = []
+        for r in rows:
+            # Query security events associated with this track in this video
+            sec_events = (
+                db.query(SecurityEventModel)
+                .filter(SecurityEventModel.video_id == video_id, SecurityEventModel.track_id == r.track_id)
+                .order_by(SecurityEventModel.timestamp_seconds.asc())
+                .all()
+            )
+            sec_event_list = [
+                {
+                    "event_type": se.event_type,
+                    "timestamp": round(se.timestamp_seconds, 2),
+                    "severity": se.severity,
+                    "description": se.description,
+                }
+                for se in sec_events
+            ]
+
+            # Factual observational movement and activity summary (zero biometric attribution)
+            dur_str = f"{round(r.duration_seconds, 1)}s"
+            act_summary = (
+                f"Continuous visual presence observed from {round(r.first_seen, 1)}s to {round(r.last_seen, 1)}s "
+                f"across {r.detection_count} detections (duration: {dur_str})."
+            )
+            if sec_event_list:
+                ev_names = ", ".join(sorted(set(se["event_type"] for se in sec_event_list)))
+                act_summary += f" Associated security event(s): {ev_names}."
+            else:
+                act_summary += " No security infractions, loitering, or suspicious security alerts were recorded for this track."
+
+            results.append({
                 "track_id": r.track_id,
                 "object_class": r.object_class,
                 "first_seen": round(r.first_seen, 2),
@@ -367,20 +397,32 @@ class InvestigationService:
                 "color_confidence": round(r.color_confidence, 4) if r.color_confidence else None,
                 "current_bbox": r.current_bbox,
                 "active": bool(r.active),
-            }
-            for r in rows
-        ]
+                "security_events": sec_event_list,
+                "activity_summary": act_summary,
+            })
 
         if target_color and obj_class:
+            if results:
+                first = results[0]
+                msg = (
+                    f"Found {len(results)} verified {obj_class} track(s) matching visual color '{target_color}' ({first['track_id']}). "
+                    f"{first['activity_summary']} "
+                    "(Note: Track IDs represent consistent visual objects in this video only; zero personal identity attribution)."
+                )
+            else:
+                msg = (
+                    f"No {obj_class} tracks with verified visual color '{target_color}' were found in database records. "
+                    "Sentinel only establishes clothing attributes when consistent multi-frame evidence exists."
+                )
+        elif results:
+            first = results[0]
             msg = (
-                f"Found {len(results)} multi-frame tracked {obj_class} objects matching visual color '{target_color}'. "
+                f"Found {len(results)} multi-frame tracked objects. "
+                f"First track ({first['track_id']}): {first['activity_summary']} "
                 "(Note: Track IDs represent consistent visual objects in this video only; zero personal identity attribution)."
             )
         else:
-            msg = (
-                f"Found {len(results)} multi-frame tracked objects. "
-                "(Note: Track IDs represent consistent visual objects in this video only; zero personal identity attribution)."
-            )
+            msg = "No multi-frame tracked objects were found in database records."
 
         return {
             "query": query_text,

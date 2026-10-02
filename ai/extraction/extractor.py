@@ -50,20 +50,52 @@ class ClipExtractor:
         end_frame = int(round(c_end * fps))
 
         output_file = self.output_dir / f"{clip_id}_clip.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(output_file), fourcc, fps, (width, height))
+        extracted_with_ffmpeg = False
+        try:
+            from backend.app.services.playback_service import get_ffmpeg_binary
+            ffmpeg_exe = get_ffmpeg_binary()
+            if ffmpeg_exe and source.exists():
+                import subprocess
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-ss", f"{c_start:.3f}",
+                    "-to", f"{c_end:.3f}",
+                    "-i", str(source),
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-movflags", "+faststart",
+                    "-threads", "2",
+                    "-an",
+                    str(output_file),
+                ]
+                res = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                if res.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
+                    extracted_with_ffmpeg = True
+        except Exception as ff_err:
+            logger.warning(f"FFmpeg extraction failed for {clip_id}, falling back to OpenCV: {ff_err}")
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        current = start_frame
+        if not extracted_with_ffmpeg:
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(output_file), fourcc, fps, (width, height))
 
-        while current <= end_frame:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                break
-            writer.write(frame)
-            current += 1
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            current = start_frame
 
-        writer.release()
+            while current <= end_frame:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                writer.write(frame)
+                current += 1
+
+            writer.release()
         cap.release()
 
         return {

@@ -686,6 +686,7 @@ class InvestigationOrchestrator:
         results = payload.get("results", [])
         evidence = payload.get("evidence", [])
         filters = payload.get("filters", {})
+        result_type = payload.get("result_type", "")
 
         target_category = filters.get("category")
         target_type = filters.get("event_type")
@@ -748,6 +749,38 @@ class InvestigationOrchestrator:
                     f"(Human verification required). {desc} Review the linked forensic evidence."
                 )
             return "Search executed successfully. No potential theft pattern was detected in the available visual evidence."
+
+        if result_type == "tracks":
+            if count == 0:
+                col = filters.get("color")
+                obj_cls = filters.get("object_class", "object")
+                if col:
+                    return (
+                        f"Search executed successfully. No verified {obj_cls} tracks matching visual color '{col}' "
+                        f"were found in database records. Sentinel only establishes visual clothing attributes when "
+                        f"multi-frame consistency exists."
+                    )
+                return f"Search executed successfully. No verified {obj_cls} tracks were found in database records."
+
+            first = results[0]
+            trk_id = first.get("track_id", "ANON-TRACK")
+            obj_cls = first.get("object_class", "person")
+            col = first.get("color")
+            color_desc = f" with {col} clothing" if col else ""
+            f_seen = first.get("first_seen", 0.0)
+            l_seen = first.get("last_seen", 0.0)
+            dur = first.get("duration_seconds", round(l_seen - f_seen, 2))
+            det_cnt = first.get("detection_count", 1)
+            act_sum = first.get("activity_summary", "")
+
+            lines = [
+                f"Found {count} verified track(s) for {obj_cls}{color_desc} ({trk_id}).",
+                f"The individual was observed from {f_seen:.1f}s to {l_seen:.1f}s ({dur:.1f}s duration, {det_cnt} detections).",
+            ]
+            if act_sum:
+                lines.append(f"Activity: {act_sum}")
+            lines.append("(Note: Observational tracking only; zero personal identity attribution or biometric identification).")
+            return " ".join(lines)
 
         if count == 0:
             target = filters.get("object_class") or filters.get("event_type") or "matching"

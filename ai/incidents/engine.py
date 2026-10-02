@@ -141,6 +141,20 @@ class IncidentIntelligenceEngine:
                 c for c in actionable_candidates if "SMOKE" not in c.event_type
             ]
 
+        # Invariant: If validated fire count == 0 and fire episodes == 0, suppress any unvalidated fire candidates
+        has_valid_fire = any(
+            getattr(o, "class_name", "") in ("fire", "flame")
+            and str(getattr(o, "validation_status", "")).upper() in ("VALID", "VALIDATED", "SPECIALIZEDVALIDATIONSTATUS.VALID")
+            for o in (context.specialized_observations or [])
+        ) or any(
+            getattr(e, "class_name", "") in ("fire", "flame")
+            for e in (context.specialized_episodes or [])
+        )
+        if not has_valid_fire:
+            actionable_candidates = [
+                c for c in actionable_candidates if "FIRE" not in c.event_type
+            ]
+
         # Step 5: Multi-signal incident fusion & deduplication
         fused_incidents = self.fusion_engine.fuse_incidents(actionable_candidates)
 

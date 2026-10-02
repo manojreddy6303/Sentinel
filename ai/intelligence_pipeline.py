@@ -55,6 +55,77 @@ from backend.app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def aggregate_track_clothing_color(track: TrackedObject) -> None:
+    """
+    Accumulate and smooth clothing color across multi-frame observation history.
+    Establishes track.color when consistent evidence exists across >= 2 observations.
+    Preserves uncertainty when observations are ambiguous or under low illumination.
+    """
+    if not track or not track.attribute_history:
+        return
+
+    valid_upper = []
+    valid_lower = []
+    for h in track.attribute_history:
+        up = h.get("upper_clothing") or h.get("clothing_color")
+        if up and not up.get("is_illumination_uncertain"):
+            c = up.get("color_name") or up.get("color")
+            if c and c not in ("unknown", "uncertain"):
+                valid_upper.append((c, float(up.get("confidence", 0.5))))
+
+        low = h.get("lower_clothing")
+        if low and not low.get("is_illumination_uncertain"):
+            c = low.get("color_name") or low.get("color")
+            if c and c not in ("unknown", "uncertain"):
+                valid_lower.append((c, float(low.get("confidence", 0.5))))
+
+    if not valid_upper and not valid_lower:
+        return
+
+    color_weights: Dict[str, float] = {}
+    color_counts: Dict[str, int] = {}
+    for c, conf in valid_upper:
+        color_weights[c] = color_weights.get(c, 0.0) + conf
+        color_counts[c] = color_counts.get(c, 0) + 1
+
+    # Integrate lower body observations (matching clothing e.g. dress or suit)
+    for c, conf in valid_lower:
+        weight_factor = 0.5 if c not in color_weights else 0.8
+        color_weights[c] = color_weights.get(c, 0.0) + conf * weight_factor
+        color_counts[c] = color_counts.get(c, 0) + 1
+
+    if not color_weights:
+        return
+
+    total_w = sum(color_weights.values())
+    top_color, top_w = max(color_weights.items(), key=lambda kv: kv[1])
+    top_count = color_counts[top_color]
+    agreement = top_w / total_w if total_w > 0 else 0.0
+
+    # Multi-frame consensus gating:
+    # Require at least 2 consistent observations and agreement >= 0.45,
+    # or single highly-confident observation if only 1 frame was observed
+    if (top_count >= 2 and agreement >= 0.45) or (top_count >= 1 and agreement >= 0.80 and len(valid_upper) == 1):
+        consensus_conf = min(0.95, max(0.50, agreement * 0.90))
+        track.color = top_color
+        track.color_confidence = round(consensus_conf, 4)
+        if track.visual_attributes is None:
+            track.visual_attributes = {}
+        track.visual_attributes["clothing_color"] = {
+            "color": top_color,
+            "color_name": top_color,
+            "confidence": round(consensus_conf, 4),
+            "observation_count": top_count,
+            "is_confirmed": (top_count >= 2 and agreement >= 0.45),
+        }
+    elif agreement < 0.40:
+        # Ambiguous / split votes: do NOT invent a color
+        track.color = None
+        track.color_confidence = None
+        if track.visual_attributes is not None and "clothing_color" in track.visual_attributes:
+            track.visual_attributes["clothing_color"]["is_confirmed"] = False
+
+
 class SecurityIntelligencePipeline:
     """
     End-to-end security video intelligence pipeline.
@@ -321,10 +392,8 @@ class SecurityIntelligencePipeline:
                                     "headwear": p_attr.headwear_present,
                                     "face_present": p_attr.face_telemetry.face_present if p_attr.face_telemetry else False,
                                 })
-                                # Only set matched_track.color if upper clothing is confirmed with good confidence
-                                if p_attr.upper_clothing and p_attr.upper_clothing.is_confirmed:
-                                    matched_track.color = p_attr.upper_clothing.color
-                                    matched_track.color_confidence = p_attr.upper_clothing.confidence
+                                # Accumulate clothing color across multi-frame observation history
+                                aggregate_track_clothing_color(matched_track)
 
                     # 2. Vehicle Color & Orientation Analysis
                     elif cls in ["car", "bus", "truck", "motorcycle"]:
@@ -364,6 +433,9 @@ class SecurityIntelligencePipeline:
 
         # Finalize tracks: separate all recorded tracks and validated persistent tracks
         all_tracks = self.tracker.finalize()
+        for trk in all_tracks:
+            if trk.object_class == "person":
+                aggregate_track_clothing_color(trk)
         validated_tracks = [t for t in all_tracks if t.is_validated]
         specialized_tracks = specialized_tracker.finalize()
         valid_spec_obs = [

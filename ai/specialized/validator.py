@@ -186,6 +186,27 @@ class SpecializedValidationEngine:
             obs.validation_reason = "Static solid-color reflective surface (uniform luminance, high circularity)"
             return obs
 
+        # Specular reflection rejection (glossy product packaging, merchandise displays, reflective signs)
+        core_ratio = metrics.get("incandescent_core_ratio", 1.0)
+        if metrics.get("inference_source") == "forensic_chromatic_rules":
+            if core_ratio < 0.08 or metrics.get("is_specular_glare", False):
+                obs.validation_status = SpecializedValidationStatus.REJECTED
+                obs.validation_reason = f"Specular reflection on non-combustion surface: core ratio ({core_ratio:.1%}) below thermal combustion threshold (8%)"
+                return obs
+
+        # Rigid background motion rejection (stationary merchandise moving solely with camera shake/pan)
+        if metrics.get("is_rigid_background", False):
+            obs.validation_status = SpecializedValidationStatus.REJECTED
+            obs.validation_reason = "Static background fixture / merchandise: region motion is rigid with background camera movement, lacking flame fluid dynamics"
+            return obs
+
+        # Geometric aspect ratio check for linear fixtures / shelf edges
+        aspect = bw / max(1.0, bh)
+        if aspect > 3.5 or aspect < 0.25:
+            obs.validation_status = SpecializedValidationStatus.REJECTED
+            obs.validation_reason = f"Non-flame geometric aspect ratio {aspect:.2f} consistent with linear fixture or shelf edge"
+            return obs
+
         # Pedestrian clothing / accessory rejection
         if metrics.get("is_person_clothing", False):
             obs.validation_status = SpecializedValidationStatus.REJECTED

@@ -325,11 +325,8 @@ def playback_evidence_clip(evidence_id: str, request: Request):
             detail=f"Evidence clip for '{evidence_id}' not found.",
         )
     except PlaybackError as err:
-        logger.error(f"Evidence clip playback conversion error for {evidence_id}: {err}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to prepare browser-compatible evidence clip: {str(err)}",
-        )
+        logger.warning(f"Evidence clip playback conversion deferred/failed for {evidence_id}: {err}; falling back to direct clip stream.")
+        playback_clip = original_clip
 
     range_header = request.headers.get("range")
     return stream_video_file_with_ranges(playback_clip, range_header)

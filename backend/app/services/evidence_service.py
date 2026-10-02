@@ -13,6 +13,7 @@ import os
 import uuid
 import json
 import logging
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -399,20 +400,52 @@ class EvidenceService:
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
 
                 clip_file = self.evidence_dir / f"{evidence_id}_clip.mp4"
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                writer = cv2.VideoWriter(str(clip_file), fourcc, fps, (width, height))
+                extracted_with_ffmpeg = False
+                try:
+                    from backend.app.services.playback_service import get_ffmpeg_binary
+                    ffmpeg_exe = get_ffmpeg_binary()
+                    if ffmpeg_exe and Path(video_path).exists():
+                        cmd = [
+                            ffmpeg_exe, "-y",
+                            "-ss", f"{c_start:.3f}",
+                            "-to", f"{c_end:.3f}",
+                            "-i", str(video_path),
+                            "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p",
+                            "-preset", "veryfast",
+                            "-crf", "23",
+                            "-movflags", "+faststart",
+                            "-threads", "2",
+                            "-an",
+                            str(clip_file),
+                        ]
+                        res = subprocess.run(
+                            cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=60,
+                        )
+                        if res.returncode == 0 and clip_file.exists() and clip_file.stat().st_size > 0:
+                            extracted_with_ffmpeg = True
+                except Exception as ff_err:
+                    logger.warning(f"Direct FFmpeg clip extraction failed for {evidence_id}, falling back to OpenCV: {ff_err}")
 
-                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-                current_frame = start_frame
+                if not extracted_with_ffmpeg:
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    writer = cv2.VideoWriter(str(clip_file), fourcc, fps, (width, height))
 
-                while current_frame <= end_frame:
-                    ret, f = cap.read()
-                    if not ret or f is None:
-                        break
-                    writer.write(f)
-                    current_frame += 1
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                    current_frame = start_frame
 
-                writer.release()
+                    while current_frame <= end_frame:
+                        ret, f = cap.read()
+                        if not ret or f is None:
+                            break
+                        writer.write(f)
+                        current_frame += 1
+
+                    writer.release()
+
                 if clip_file.exists() and clip_file.stat().st_size > 0:
                     clip_path = str(clip_file)
                     try:

@@ -30,6 +30,29 @@ OBJECT_SYNONYMS = {
     "children": "person",
     "individual": "person",
     "individuals": "person",
+    "lady": "person",
+    "ladies": "person",
+    "guy": "person",
+    "guys": "person",
+    "girl": "person",
+    "girls": "person",
+    "dress": "person",
+    "dresses": "person",
+    "skirt": "person",
+    "skirts": "person",
+    "coat": "person",
+    "coats": "person",
+    "jacket": "person",
+    "jackets": "person",
+    "hoodie": "person",
+    "hoodies": "person",
+    "shirt": "person",
+    "shirts": "person",
+    "pants": "person",
+    "trousers": "person",
+    "clothes": "person",
+    "clothing": "person",
+    "attire": "person",
 
     # Vehicles
     "car": "car",
@@ -150,7 +173,14 @@ class InvestigationParser:
 
         if matched_color:
             is_vehicle = bool(re.search(r"\b(car|cars|vehicle|vehicles|truck|trucks|bus|buses|motorcycle|motorcycles|automobile|automobiles)\b", cleaned))
-            is_person = bool(re.search(r"\b(person|people|someone|suspect|individual|man|woman|guy|girl|wearing|hoodie|jacket|shirt|clothing)\b", cleaned))
+            is_person = bool(re.search(
+                r"\b(person|people|someone|suspect|individual|individuals|man|men|woman|women|lady|ladies|guy|guys|girl|girls|wearing|hoodie|hoodies|jacket|jackets|shirt|shirts|dress|dresses|skirt|skirts|pants|trousers|coat|coats|clothes|clothing|attire)\b",
+                cleaned
+            ))
+            has_action = bool(re.search(
+                r"\b(did|do|doing|done|action|actions|activity|movement|move|moved|moving|walk|walking|run|running|ran|stand|standing|stood|sit|sitting|sat|behavior|happened|events?)\b",
+                cleaned
+            ))
             if is_vehicle:
                 # Extract specific vehicle class if present
                 v_class = "vehicle_group"
@@ -167,13 +197,20 @@ class InvestigationParser:
                     },
                 }
             elif is_person:
+                interpreted_filters = {
+                    "color": matched_color,
+                    "object_class": "person",
+                }
+                if has_action:
+                    interpreted_filters["query_action"] = True
+                for descriptor in ["dress", "skirt", "jacket", "hoodie", "shirt", "coat", "pants", "suit"]:
+                    if re.search(r"\b" + descriptor + r"\b", cleaned):
+                        interpreted_filters["clothing_descriptor"] = descriptor
+                        break
                 return {
                     "is_supported": True,
                     "result_type": "tracks",
-                    "interpreted_filters": {
-                        "color": matched_color,
-                        "object_class": "person",
-                    },
+                    "interpreted_filters": interpreted_filters,
                 }
             else:
                 # Color queried for non-supported category
