@@ -297,7 +297,7 @@ class InvestigationOrchestrator:
                 th = theft_sec[0]
                 th_dur = th.duration_seconds or 0.0
                 th_end = th.timestamp_seconds + th_dur if th_dur > 0 else th.timestamp_seconds
-                th_interval = f"[{th.timestamp_seconds:.1f}s – {th_end:.1f}s]" if th_dur > 0 else f"around {th.timestamp_seconds:.1f}s"
+                th_interval = f"[{th.timestamp_seconds:.1f}s - {th_end:.1f}s]" if th_dur > 0 else f"around {th.timestamp_seconds:.1f}s"
                 answer_parts = [
                     "### VIDEO ACTIVITY SUMMARY",
                     "- A potential theft/takeaway sequence was detected.",
@@ -403,7 +403,7 @@ class InvestigationOrchestrator:
                 th = theft_events[0]
                 th_dur = th.duration_seconds or 0.0
                 th_end = th.timestamp_seconds + th_dur
-                th_interval = f"[{th.timestamp_seconds:.1f}s – {th_end:.1f}s]" if th_dur > 0 else f"around {th.timestamp_seconds:.1f}s"
+                th_interval = f"[{th.timestamp_seconds:.1f}s - {th_end:.1f}s]" if th_dur > 0 else f"around {th.timestamp_seconds:.1f}s"
                 answer = "\n".join([
                     "### VIDEO ACTIVITY SUMMARY",
                     "- A potential theft/takeaway sequence was detected.",
@@ -803,7 +803,7 @@ class InvestigationOrchestrator:
                 dur = lead.get("duration_seconds") or 0.0
                 end_ts = ts + dur if dur > 0 else ts
                 desc = lead.get("description", "")
-                interval_str = f"[{ts:.1f}s – {end_ts:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
+                interval_str = f"[{ts:.1f}s - {end_ts:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
                 parts = [
                     "### VIDEO ACTIVITY SUMMARY",
                     "- A potential theft/takeaway sequence was detected.",

@@ -118,10 +118,10 @@ class ForcedMovementDetector(BaseIncidentDetector):
                     continue
 
                 # Both tracks must undergo genuine spatial transit across the scene.
-                # Stationary proximity, detector jitter, or dwelling in place (< 25px) is NOT forced movement.
+                # Stationary proximity, detector jitter, or dwelling in place (< 30px) is NOT forced movement.
                 disp1 = math.hypot(pts1[-1][1] - pts1[0][1], pts1[-1][2] - pts1[0][2])
                 disp2 = math.hypot(pts2[-1][1] - pts2[0][1], pts2[-1][2] - pts2[0][2])
-                if disp1 < 25.0 or disp2 < 25.0:
+                if disp1 < 30.0 or disp2 < 30.0:
                     continue
 
                 # Check if either track is interacting with an object / portable property (theft/takeaway sequence)
@@ -130,34 +130,59 @@ class ForcedMovementDetector(BaseIncidentDetector):
                     if t.object_class != "person" and t.is_validated and t.trajectory:
                         for p_cand in [p1, p2]:
                             if p_cand.trajectory:
-                                p_last = p_cand.trajectory[-1]
-                                t_last = t.trajectory[-1]
-                                if math.hypot(p_last[1] - t_last[1], p_last[2] - t_last[2]) < 85.0:
-                                    has_property_interaction = True
-                                    break
+                                for p_pt in p_cand.trajectory:
+                                    for o_pt in t.trajectory:
+                                        if math.hypot(p_pt[1] - o_pt[1], p_pt[2] - o_pt[2]) < 100.0:
+                                            has_property_interaction = True
+                                            break
+                                    if has_property_interaction:
+                                        break
+                            if has_property_interaction:
+                                break
+                    if has_property_interaction:
+                        break
                 if has_property_interaction:
                     continue
 
-                # Check for synchronized direction changes while in lockstep
-                headings = []
+                # Check for synchronized direction changes while in lockstep for BOTH individuals
+                headings1 = []
                 for k in range(len(pts1) - 1):
                     dx = pts1[k + 1][1] - pts1[k][1]
                     dy = pts1[k + 1][2] - pts1[k][2]
                     if math.hypot(dx, dy) > 10.0:
-                        headings.append(math.degrees(math.atan2(dy, dx)))
+                        headings1.append(math.degrees(math.atan2(dy, dx)))
 
-                deflection_count = 0
-                if len(headings) >= 2:
-                    for h_idx in range(len(headings) - 1):
-                        diff = abs(headings[h_idx + 1] - headings[h_idx]) % 360.0
-                        if diff > 180.0:
-                            diff = 360.0 - diff
-                        if diff >= self.min_deflection_angle_deg:
-                            deflection_count += 1
+                headings2 = []
+                for k in range(len(pts2) - 1):
+                    dx = pts2[k + 1][1] - pts2[k][1]
+                    dy = pts2[k + 1][2] - pts2[k][2]
+                    if math.hypot(dx, dy) > 10.0:
+                        headings2.append(math.degrees(math.atan2(dy, dx)))
 
-                # Require the minimum number of sharp deflections
-                if deflection_count < self.min_deflections:
+                if len(headings1) < 2 or len(headings2) < 2:
                     continue
+
+                deflection_count1 = 0
+                for h_idx in range(len(headings1) - 1):
+                    diff = abs(headings1[h_idx + 1] - headings1[h_idx]) % 360.0
+                    if diff > 180.0:
+                        diff = 360.0 - diff
+                    if diff >= self.min_deflection_angle_deg:
+                        deflection_count1 += 1
+
+                deflection_count2 = 0
+                for h_idx in range(len(headings2) - 1):
+                    diff = abs(headings2[h_idx + 1] - headings2[h_idx]) % 360.0
+                    if diff > 180.0:
+                        diff = 360.0 - diff
+                    if diff >= self.min_deflection_angle_deg:
+                        deflection_count2 += 1
+
+                # Require the minimum number of sharp synchronized deflections from both participants
+                if deflection_count1 < self.min_deflections or deflection_count2 < self.min_deflections:
+                    continue
+
+                deflection_count = min(deflection_count1, deflection_count2)
 
                 event_t = (max(p1.first_seen, p2.first_seen) + min(p1.last_seen, p2.last_seen)) / 2.0
 

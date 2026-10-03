@@ -664,7 +664,7 @@ class IncidentFusionEngine:
                         if TemporalAnalysisEngine.is_temporally_overlapping(
                             th.start_time, th.end_time,
                             c.start_time, c.end_time,
-                            tolerance_seconds=5.0,
+                            tolerance_seconds=20.0,
                         ):
                             overlaps_theft = True
                             if th.incident_metadata is None:

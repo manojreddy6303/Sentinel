@@ -87,11 +87,17 @@ class PhysicalAltercationDetector(BaseIncidentDetector):
                     if t.object_class != "person" and t.is_validated and t.trajectory:
                         for p_cand in [p1, p2]:
                             if p_cand.trajectory:
-                                p_last = p_cand.trajectory[-1]
-                                t_last = t.trajectory[-1]
-                                if math.hypot(p_last[1] - t_last[1], p_last[2] - t_last[2]) < 85.0:
-                                    has_property_interaction = True
-                                    break
+                                for p_pt in p_cand.trajectory:
+                                    for o_pt in t.trajectory:
+                                        if math.hypot(p_pt[1] - o_pt[1], p_pt[2] - o_pt[2]) < 100.0:
+                                            has_property_interaction = True
+                                            break
+                                    if has_property_interaction:
+                                        break
+                            if has_property_interaction:
+                                break
+                    if has_property_interaction:
+                        break
                 if has_property_interaction:
                     continue
 

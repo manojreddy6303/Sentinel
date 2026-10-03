@@ -375,11 +375,14 @@ class PersonMotionFeatureEngine:
 
         reciprocal_score = (oscillations * 0.35) + (opposing_count * 0.20) + (min(2, agitated_velocity_count) * 0.15)
         # Real altercation requires: close proximity, multiple oscillations (not a single pass),
-        # elevated kinetic movement, and NOT a simple pass-by
+        # genuine opposing vectors or elevated kinetic agitation, and NOT a simple pass-by.
+        # Proximity or ordinary movement alone must NOT become physical altercation.
+        has_active_conflict = (opposing_count >= 1 or agitated_velocity_count >= 1)
         is_reciprocal = (
-            (min_dist < mean_scale * 1.35)
+            (min_dist <= mean_scale * 1.20)
             and (oscillations >= 2)
             and (reciprocal_score >= 0.65)
+            and has_active_conflict
             and not is_passing
         )
 

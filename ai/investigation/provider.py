@@ -392,7 +392,7 @@ class MockLLMProvider(LLMProvider):
                 dur = lead.get("duration_seconds") or 0.0
                 end_ts = ts + dur if dur > 0 else ts
                 desc = lead.get("description", "")
-                interval_str = f"[{ts:.1f}s – {end_ts:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
+                interval_str = f"[{ts:.1f}s - {end_ts:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
                 parts = [
                     "### VIDEO ACTIVITY SUMMARY",
                     "- A potential theft/takeaway sequence was detected.",
