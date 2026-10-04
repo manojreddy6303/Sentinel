@@ -205,12 +205,15 @@ class DetectionValidator:
                         score=conf,
                         reason=f"Small isolated detection (area fraction {effective_area_frac:.5f} < {rule.min_area_fraction:.5f}) with standalone confidence ({conf:.2f})",
                     )
-                elif obj_class in {"backpack", "suitcase", "handbag"} and conf >= rule.min_confidence_with_temporal:
-                    # Unattended luggage catch-22 fix: allow to reach UNCERTAIN for dwell evaluation
+                elif obj_class in {
+                    "backpack", "suitcase", "handbag", "cell phone", "bottle",
+                    "laptop", "umbrella", "general_object", "package", "box", "merchandise", "book"
+                } and conf >= rule.min_confidence_with_temporal:
+                    # Small portable belongings: allow to reach UNCERTAIN for temporal tracking evaluation
                     return ValidationResult(
                         status=ValidationStatus.UNCERTAIN,
                         score=conf,
-                        reason=f"Candidate small unattended {obj_class} ({conf:.2f}) pending temporal dwell evaluation",
+                        reason=f"Candidate small portable {obj_class} ({conf:.2f}) pending temporal tracking evaluation",
                     )
                 else:
                     return ValidationResult(

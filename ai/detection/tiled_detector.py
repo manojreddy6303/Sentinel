@@ -113,7 +113,8 @@ class TiledObjectDetector:
             is_weak = (0.20 <= conf <= 0.45)
             is_surveillance_class = cls in (
                 "person", "car", "bicycle", "motorcycle", "backpack",
-                "handbag", "suitcase", "bottle", "package", "box", "chair"
+                "handbag", "suitcase", "bottle", "cell phone", "laptop",
+                "umbrella", "book", "package", "box", "merchandise", "general_object", "chair"
             )
 
             if (is_small or is_weak) and is_surveillance_class:

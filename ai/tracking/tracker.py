@@ -48,6 +48,15 @@ class ObjectTracker:
                 "backpack",
                 "suitcase",
                 "handbag",
+                "bottle",
+                "cell phone",
+                "laptop",
+                "umbrella",
+                "book",
+                "box",
+                "package",
+                "merchandise",
+                "general_object",
             ]
         )
         self._next_id = 1

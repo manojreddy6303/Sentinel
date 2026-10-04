@@ -52,7 +52,7 @@ class ObjectDisplacementDetector(BaseIncidentDetector):
         self.min_scale_ratio = min_scale_ratio
         self.target_classes = {
             "backpack", "handbag", "suitcase", "laptop", "cell phone",
-            "bottle", "umbrella", "box", "package", "bicycle", "chair",
+            "bottle", "umbrella", "box", "package", "merchandise", "book", "general_object", "bicycle", "chair",
         }
         self.stability_engine = CameraStabilityEngine()
 

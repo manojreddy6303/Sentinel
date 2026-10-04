@@ -48,7 +48,7 @@ class RestrictedObjectMovementDetector(BaseIncidentDetector):
         self.min_zone_dwell_seconds = min_zone_dwell_seconds
         self.portable_classes = {
             "backpack", "handbag", "suitcase", "laptop", "cell phone",
-            "box", "package", "bicycle",
+            "bottle", "umbrella", "box", "package", "merchandise", "book", "general_object", "bicycle",
         }
 
     def analyze(self, context: IncidentContext) -> List[IncidentCandidate]:

@@ -189,9 +189,11 @@ class Settings:
     # Surveillance-relevant COCO classes to report. Only classes supported
     # by the selected pretrained YOLO model are included.
     SURVEILLANCE_CLASSES: Set[str] = {
-        "person", "bicycle", "car", "motorcycle", "bus", "truck",
-        "backpack", "handbag", "suitcase", "bottle", "cell phone",
-        "chair", "bench", "traffic light", "stop sign",
+        "person", "bicycle", "car", "motorcycle", "bus", "truck", "boat", "train", "airplane",
+        "backpack", "handbag", "suitcase", "bottle", "cell phone", "laptop", "mouse",
+        "remote", "keyboard", "book", "clock", "vase", "scissors", "umbrella", "cup",
+        "chair", "bench", "couch", "bed", "dining table", "traffic light", "stop sign", "fire hydrant",
+        "general_object", "package", "box", "merchandise",
     }
 
     # -------------------------------------------------------------------------
@@ -211,7 +213,8 @@ class Settings:
     THEFT_OBJECT_LOSS_WINDOW: float = float(os.getenv("THEFT_OBJECT_LOSS_WINDOW", "4.0"))
     THEFT_TARGET_CLASSES: Set[str] = {
         "backpack", "handbag", "suitcase", "laptop", "cell phone",
-        "bottle", "umbrella", "bicycle", "box", "package",
+        "bottle", "umbrella", "bicycle", "box", "package", "book",
+        "cup", "vase", "scissors", "clock", "remote", "merchandise", "general_object",
     }
 
     # -------------------------------------------------------------------------

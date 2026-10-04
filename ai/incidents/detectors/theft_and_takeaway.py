@@ -119,7 +119,7 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
             {
                 "backpack", "handbag", "suitcase", "laptop", "cell phone", "bottle",
                 "umbrella", "bicycle", "box", "package", "book", "cup", "vase",
-                "scissors", "teddy bear", "clock", "remote", "merchandise",
+                "scissors", "teddy bear", "clock", "remote", "merchandise", "general_object",
             },
         )
         non_person_tracks = [t for t in context.tracks if t.object_class in target_classes]
@@ -182,9 +182,9 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                     continue
 
                 # Require minimally stable object track to avoid flagging single-frame detector dropouts as theft,
-                # unless verified interaction dwell occurred during person proximity
+                # unless rapid takeaway or verified interaction dwell occurred during person proximity
                 if len(o_track.trajectory) < 2 and o_track.duration_seconds < 0.5:
-                    if len(proximity_moments) < 2 or interaction_duration < 1.0:
+                    if not is_rapid_loss and (len(proximity_moments) < 2 or interaction_duration < 1.0):
                         continue
 
                 # Disappearance or co-movement

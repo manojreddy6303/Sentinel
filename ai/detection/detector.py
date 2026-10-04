@@ -23,12 +23,20 @@ from ai.common.numeric import is_finite_number, ensure_finite, clamp_finite
 
 logger = logging.getLogger(__name__)
 
-# Surveillance-relevant COCO class names.
-# Only classes present in the YOLO COCO80 class list are included.
+# Surveillance-relevant COCO and forensic object classes.
 SURVEILLANCE_CLASSES = {
-    "person", "bicycle", "car", "motorcycle", "bus", "truck",
-    "backpack", "handbag", "suitcase", "bottle", "cell phone",
-    "chair", "bench", "traffic light", "stop sign",
+    # Persons
+    "person",
+    # Vehicles & transit
+    "bicycle", "car", "motorcycle", "bus", "truck", "boat", "train", "airplane",
+    # Portable property / personal belongings / retail merchandise
+    "backpack", "handbag", "suitcase", "bottle", "cell phone", "laptop",
+    "mouse", "remote", "keyboard", "book", "clock", "vase", "scissors",
+    "umbrella", "cup", "knife", "baseball bat", "sports ball", "skateboard",
+    # Furniture & Infrastructure
+    "chair", "bench", "couch", "bed", "dining table", "traffic light", "stop sign", "fire hydrant",
+    # Generic investigation object labels
+    "general_object", "package", "box", "merchandise",
 }
 
 

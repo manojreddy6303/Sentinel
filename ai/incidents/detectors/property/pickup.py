@@ -53,7 +53,7 @@ class ObjectPickupDetector(BaseIncidentDetector):
         self.min_pickup_displacement = min_pickup_displacement
         self.target_classes = {
             "backpack", "handbag", "suitcase", "laptop", "cell phone",
-            "bottle", "umbrella", "box", "package", "bicycle",
+            "bottle", "umbrella", "box", "package", "merchandise", "book", "general_object", "bicycle",
         }
         self.association_engine = ObjectPersonAssociationEngine()
         self.stability_engine = CameraStabilityEngine()

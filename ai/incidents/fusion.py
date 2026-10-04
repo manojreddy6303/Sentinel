@@ -151,73 +151,6 @@ class IncidentFusionEngine:
     # Alias for backward compatibility
     fuse_candidates = fuse_incidents
 
-    def _arbitrate_competing_person_interactions(self, candidates: List[IncidentCandidate]) -> List[IncidentCandidate]:
-        """
-        Arbitrate mutually competing or overlapping person interaction hypotheses
-        (POTENTIAL_PHYSICAL_ALTERCATION, POTENTIAL_FORCED_MOVEMENT, PERSON_FOLLOWING)
-        sharing the same track pairs within the same temporal window.
-        Prevents emitting 3 competing separate high-confidence events for 1 ambiguous interaction.
-        """
-        interaction_types = {
-            "POTENTIAL_PHYSICAL_ALTERCATION",
-            "POTENTIAL_FORCED_MOVEMENT",
-            "PERSON_FOLLOWING",
-        }
-        interactions = [c for c in candidates if c.event_type in interaction_types]
-        non_interactions = [c for c in candidates if c.event_type not in interaction_types]
-        if len(interactions) <= 1:
-            return candidates
-
-        # Group interactions by track pair and temporal overlap
-        arbitrated: List[IncidentCandidate] = []
-        clusters: List[List[IncidentCandidate]] = []
-
-        for cand in sorted(interactions, key=lambda c: c.start_time):
-            cand_pair = tuple(sorted(cand.track_ids[:2])) if len(cand.track_ids) >= 2 else tuple(cand.track_ids)
-            placed = False
-            for cl in clusters:
-                lead = cl[0]
-                lead_pair = tuple(sorted(lead.track_ids[:2])) if len(lead.track_ids) >= 2 else tuple(lead.track_ids)
-                if cand_pair == lead_pair and TemporalAnalysisEngine.is_temporally_overlapping(
-                    lead.start_time, lead.end_time,
-                    cand.start_time, cand.end_time,
-                    tolerance_seconds=self.time_merge_tolerance_seconds,
-                ):
-                    cl.append(cand)
-                    placed = True
-                    break
-            if not placed:
-                clusters.append([cand])
-
-        for cl in clusters:
-            if len(cl) == 1:
-                arbitrated.append(cl[0])
-            else:
-                # Multiple competing hypotheses on the same track pair
-                primary = max(cl, key=lambda c: c.confidence)
-                alt_types = [c.event_type for c in cl if c.event_type != primary.event_type]
-
-                # Merge supporting signals without duplicates
-                all_sigs = list(primary.supporting_signals)
-                sig_descs = {s.description for s in all_sigs}
-                for c in cl:
-                    for s in c.supporting_signals:
-                        if s.description not in sig_descs:
-                            sig_descs.add(s.description)
-                            all_sigs.append(s)
-
-                primary.supporting_signals = all_sigs
-                primary.validation_decision = "REVIEW_REQUIRED"
-                primary.confidence = min(primary.confidence, 0.65)
-                if "fused" not in primary.explanation.lower():
-                    primary.explanation += f" (Arbitrated with alternate hypotheses: {', '.join(alt_types)})."
-                if primary.incident_metadata is None:
-                    primary.incident_metadata = {}
-                primary.incident_metadata["alternate_hypotheses"] = alt_types
-                arbitrated.append(primary)
-
-        return non_interactions + arbitrated
-
     def _merge_cluster(self, cluster: List[IncidentCandidate]) -> IncidentCandidate:
         """Merge multiple candidates belonging to the same cluster into a singular candidate."""
         lead = cluster[0]
@@ -419,6 +352,16 @@ class IncidentFusionEngine:
                 cl_sorted = sorted(cl, key=lambda x: x.confidence, reverse=True)
                 primary = cl_sorted[0]
                 alternates = [c.event_type for c in cl_sorted[1:]]
+
+                # Merge supporting signals without duplicates
+                all_sigs = list(primary.supporting_signals)
+                sig_descs = {s.description for s in all_sigs}
+                for c in cl_sorted[1:]:
+                    for s in c.supporting_signals:
+                        if s.description not in sig_descs:
+                            sig_descs.add(s.description)
+                            all_sigs.append(s)
+                primary.supporting_signals = all_sigs
 
                 # Attach alternate hypotheses to primary metadata
                 if primary.incident_metadata is None:
