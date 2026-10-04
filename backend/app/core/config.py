@@ -224,7 +224,11 @@ class Settings:
     FIRE_DETECTION_ENABLED: bool = os.getenv("FIRE_DETECTION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
     SMOKE_DETECTION_ENABLED: bool = os.getenv("SMOKE_DETECTION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
     WEAPON_DETECTION_ENABLED: bool = os.getenv("WEAPON_DETECTION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
-    POSE_DETECTION_ENABLED: bool = os.getenv("POSE_DETECTION_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+    # -------------------------------------------------------------------------
+    # Phase 0.2: Generic Micro-Object & Interaction Recovery Configuration
+    # -------------------------------------------------------------------------
+    MICRO_OBJECT_RECOVERY_ENABLED: bool = os.getenv("MICRO_OBJECT_RECOVERY_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+
     # -------------------------------------------------------------------------
     # Phase 20.3: Production Memory Hardening Configuration
     # -------------------------------------------------------------------------

@@ -50,6 +50,7 @@ from ai.common.detector_health import (
     DetectorOperationalStatus,
     DetectorModelType,
 )
+from ai.detection.micro_object import MicroObjectRecoveryEngine
 from backend.app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,7 @@ class SecurityIntelligencePipeline:
         self.specialized_registry = specialized_registry or get_specialized_registry()
         self.episode_aggregator = episode_aggregator or SpecializedVisualEpisodeAggregator()
         self.specialized_validator = specialized_validator or SpecializedValidationEngine()
+        self.micro_engine = MicroObjectRecoveryEngine()
 
         # Ensure default specialized detectors are registered
         if not self.specialized_registry.get("fire_visual_detector"):
@@ -437,6 +439,45 @@ class SecurityIntelligencePipeline:
             if trk.object_class == "person":
                 aggregate_track_clothing_color(trk)
         validated_tracks = [t for t in all_tracks if t.is_validated]
+
+        # Phase 0.2: Universal Micro-Object & Object-Interaction Recovery Engine
+        # Discovers unmodeled small portable objects (<32px or outside COCO)
+        # via selective spatio-temporal reach ROI analysis around dwelling person tracks.
+        if getattr(settings, "MICRO_OBJECT_RECOVERY_ENABLED", True) and video_w and video_h:
+            dwelling_intervals = self.micro_engine.discover_dwelling_person_intervals(validated_tracks, fps)
+            if dwelling_intervals:
+                recovered_micro_dets = self.micro_engine.recover_micro_objects_from_video(
+                    video_path=video_path,
+                    dwelling_intervals=dwelling_intervals,
+                    fps=fps,
+                    frame_width=int(video_w),
+                    frame_height=int(video_h),
+                    sampled_frames_cache=sampled_frames,
+                )
+                if recovered_micro_dets:
+                    # Re-run tracking to integrate recovered micro-objects alongside baseline detections
+                    self.tracker.reset(video_id=video_id)
+                    all_ts = sorted(set(list(events_by_time.keys()) + [rd["timestamp"] for rd in recovered_micro_dets]))
+                    for ts in all_ts:
+                        frame_dets = list(events_by_time.get(ts, []))
+                        for rd in recovered_micro_dets:
+                            if abs(rd["timestamp"] - ts) < 0.25:
+                                frame_dets.append(rd)
+                        valid_frame_dets = [
+                            d for d in frame_dets
+                            if str(d.get("validation_status", "VALID")).upper() != "REJECTED"
+                        ]
+                        self.tracker.update(
+                            timestamp=ts,
+                            detections=valid_frame_dets,
+                            frame_width=video_w,
+                            frame_height=video_h,
+                        )
+                    all_tracks = self.tracker.finalize()
+                    for trk in all_tracks:
+                        if trk.object_class == "person":
+                            aggregate_track_clothing_color(trk)
+                    validated_tracks = [t for t in all_tracks if t.is_validated]
         specialized_tracks = specialized_tracker.finalize()
         valid_spec_obs = [
             o for o in specialized_observations
