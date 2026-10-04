@@ -209,11 +209,13 @@ class YOLODetector:
             List of standardized canonical detection dicts.
         """
         model = self._load_model()
+        min_conf = min([self.confidence_threshold] + list(self.class_confidence_thresholds.values())) if self.class_confidence_thresholds else self.confidence_threshold
+        min_conf = max(0.01, min_conf)
         try:
             if imgsz:
-                results = model(frame, imgsz=imgsz, verbose=False)
+                results = model(frame, imgsz=imgsz, conf=min_conf, verbose=False)
             else:
-                results = model(frame, verbose=False)
+                results = model(frame, conf=min_conf, verbose=False)
         except Exception as exc:
             logger.error(f"YOLO inference failed at timestamp {timestamp:.2f}s: {exc}")
             raise RuntimeError(f"YOLO inference error: {exc}") from exc
@@ -245,11 +247,13 @@ class YOLODetector:
         if not frames:
             return []
         model = self._load_model()
+        min_conf = min([self.confidence_threshold] + list(self.class_confidence_thresholds.values())) if self.class_confidence_thresholds else self.confidence_threshold
+        min_conf = max(0.01, min_conf)
         try:
             if imgsz:
-                results = model(frames, imgsz=imgsz, verbose=False)
+                results = model(frames, imgsz=imgsz, conf=min_conf, verbose=False)
             else:
-                results = model(frames, verbose=False)
+                results = model(frames, conf=min_conf, verbose=False)
         except Exception as exc:
             logger.error(f"YOLO batch inference failed: {exc}")
             raise RuntimeError(f"YOLO batch inference error: {exc}") from exc

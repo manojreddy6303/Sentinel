@@ -241,6 +241,17 @@ DEFAULT_CLASS_RULES: Dict[str, ClassValidationRule] = {
         requires_temporal_support=False,
         context_boost_classes={"person"},
     ),
+    "unknown_portable_object": ClassValidationRule(
+        min_confidence_standalone=0.28,
+        min_confidence_with_temporal=0.20,
+        min_area_fraction=0.000015,
+        min_pixel_dimension=6,
+        min_pixel_area=36,
+        min_aspect_ratio=0.10,
+        max_aspect_ratio=8.0,
+        requires_temporal_support=False,
+        context_boost_classes={"person"},
+    ),
 }
 
 # Fallback profile for unseen / unknown COCO classes

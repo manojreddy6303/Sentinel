@@ -57,6 +57,7 @@ class ObjectTracker:
                 "package",
                 "merchandise",
                 "general_object",
+                "unknown_portable_object",
             ]
         )
         self._next_id = 1

@@ -56,7 +56,7 @@ class ObjectRemovalDetector(BaseIncidentDetector):
         self.frame_edge_margin_px = frame_edge_margin_px
         self.target_classes = {
             "backpack", "handbag", "suitcase", "laptop", "cell phone",
-            "bottle", "umbrella", "box", "package", "merchandise", "book", "general_object", "bicycle",
+            "bottle", "umbrella", "box", "package", "merchandise", "book", "general_object", "unknown_portable_object", "bicycle",
         }
         self.stability_engine = CameraStabilityEngine(frame_margin_px=frame_edge_margin_px)
 

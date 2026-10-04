@@ -54,7 +54,7 @@ class ObjectLeftBehindDetector(BaseIncidentDetector):
         self.departure_min_distance = departure_min_distance
         self.target_classes = {
             "backpack", "handbag", "suitcase", "laptop", "cell phone",
-            "bottle", "umbrella", "box", "package", "merchandise", "book", "general_object", "bicycle",
+            "bottle", "umbrella", "box", "package", "merchandise", "book", "general_object", "unknown_portable_object", "bicycle",
         }
         self.state_machine = ObjectStateMachine()
         self.association_engine = ObjectPersonAssociationEngine(

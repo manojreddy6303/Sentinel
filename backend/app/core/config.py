@@ -193,7 +193,7 @@ class Settings:
         "backpack", "handbag", "suitcase", "bottle", "cell phone", "laptop", "mouse",
         "remote", "keyboard", "book", "clock", "vase", "scissors", "umbrella", "cup",
         "chair", "bench", "couch", "bed", "dining table", "traffic light", "stop sign", "fire hydrant",
-        "general_object", "package", "box", "merchandise",
+        "general_object", "package", "box", "merchandise", "unknown_portable_object",
     }
 
     # -------------------------------------------------------------------------
@@ -214,7 +214,7 @@ class Settings:
     THEFT_TARGET_CLASSES: Set[str] = {
         "backpack", "handbag", "suitcase", "laptop", "cell phone",
         "bottle", "umbrella", "bicycle", "box", "package", "book",
-        "cup", "vase", "scissors", "clock", "remote", "merchandise", "general_object",
+        "cup", "vase", "scissors", "clock", "remote", "merchandise", "general_object", "unknown_portable_object",
     }
 
     # -------------------------------------------------------------------------

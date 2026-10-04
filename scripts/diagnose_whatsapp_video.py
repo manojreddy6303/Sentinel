@@ -48,7 +48,7 @@ events = generator.generate_events(
 )
 
 print(f'\nTotal generated events: {len(events)}')
-valid_events = [e for e in events if getattr(e, 'validation_status', None) == 'VALID']
+valid_events = [e for e in events if getattr(e, 'validation_status', None) == 'VALID' or getattr(getattr(e, 'validation_status', None), 'value', None) == 'VALID']
 print(f'Valid events: {len(valid_events)}')
 
 intel_pipe = SecurityIntelligencePipeline(zones=[])
@@ -63,7 +63,7 @@ intel_res = intel_pipe.process_video_intelligence(
 
 print(f'\nTotal Tracks: {len(intel_res["tracks"])}')
 for trk in intel_res["tracks"]:
-    print(f'  Track {trk.track_id}: class={trk.object_class}, duration={trk.duration_seconds:.1f}s ({trk.first_seen_timestamp:.1f}s -> {trk.last_seen_timestamp:.1f}s), det_count={trk.detection_count}')
+    print(f'  Track {trk.track_id}: class={trk.object_class}, duration={trk.duration_seconds:.1f}s ({trk.first_seen:.1f}s -> {trk.last_seen:.1f}s), det_count={trk.detection_count}')
 
 print(f'\nCorrelated Incidents: {len(intel_res.get("correlated_incidents", []))}')
 for inc in intel_res.get("correlated_incidents", []):

@@ -119,7 +119,7 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
             {
                 "backpack", "handbag", "suitcase", "laptop", "cell phone", "bottle",
                 "umbrella", "bicycle", "box", "package", "book", "cup", "vase",
-                "scissors", "teddy bear", "clock", "remote", "merchandise", "general_object",
+                "scissors", "teddy bear", "clock", "remote", "merchandise", "general_object", "unknown_portable_object",
             },
         )
         non_person_tracks = [t for t in context.tracks if t.object_class in target_classes]
