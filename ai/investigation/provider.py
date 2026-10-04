@@ -298,7 +298,7 @@ class MockLLMProvider(LLMProvider):
             }
 
         # Phase 8: Potential theft / takeaway behavior check
-        if any(term in q for term in ["theft", "takeaway", "burglary", "stolen", "stealing"]):
+        if any(term in q for term in ["theft", "takeaway", "burglary", "stolen", "stealing", "taken", "take", "robbery"]):
             return {
                 "intent": "investigate",
                 "object_classes": None,

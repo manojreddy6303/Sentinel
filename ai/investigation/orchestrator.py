@@ -148,7 +148,7 @@ class InvestigationOrchestrator:
                 "min_confidence": None,
                 "result_type": "events",
             }
-        if any(w in q for w in ["theft", "stealing", "takeaway", "burglary", "stolen"]):
+        if any(w in q for w in ["theft", "stealing", "takeaway", "burglary", "stolen", "taken", "take", "robbery"]):
             parsed = self.investigation_service.parser.parse_query(query)
             filters = parsed.get("interpreted_filters", {})
             return {
@@ -397,7 +397,7 @@ class InvestigationOrchestrator:
                 .all()
             )
             theft_events = [e for e in sec_events if e.event_type == "POTENTIAL_THEFT"]
-            is_theft_query = any(w in query.lower() for w in ["theft", "stealing", "takeaway", "burglary", "stolen"])
+            is_theft_query = any(w in query.lower() for w in ["theft", "stealing", "takeaway", "burglary", "stolen", "taken", "take", "robbery"])
 
             if theft_events:
                 th = theft_events[0]
