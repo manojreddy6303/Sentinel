@@ -67,4 +67,22 @@ for trk in intel_res["tracks"]:
 
 print(f'\nCorrelated Incidents: {len(intel_res.get("correlated_incidents", []))}')
 for inc in intel_res.get("correlated_incidents", []):
-    print(f'  Incident: {inc.get("incident_id")}, subcategory={inc.get("incident_subcategory")}, score={inc.get("assessment_score")}')
+    inc_id = getattr(inc, "incident_id", None) or (inc.get("incident_id") if isinstance(inc, dict) else None)
+    subcat = getattr(inc, "incident_subcategory", None) or (inc.get("incident_subcategory") if isinstance(inc, dict) else None)
+    score = getattr(inc, "assessment_score", None) or (inc.get("assessment_score") if isinstance(inc, dict) else None)
+    val_dec = getattr(inc, "validation_decision", None) or (inc.get("validation_decision") if isinstance(inc, dict) else None)
+    storyline = getattr(inc, "storyline", None) or (inc.get("storyline") if isinstance(inc, dict) else None)
+    print(f'  Incident: {inc_id}, subcat={subcat}, score={score}, decision={val_dec}')
+    print(f'    Storyline: {storyline}')
+
+print(f'\nSecurity Events: {len(intel_res.get("security_events", []))}')
+for sev in intel_res.get("security_events", []):
+    sev_id = getattr(sev, "event_id", None) or getattr(sev, "id", None)
+    ev_type = getattr(sev, "event_type", None)
+    ts = getattr(sev, "timestamp", None)
+    dur = getattr(sev, "duration_seconds", None)
+    conf = getattr(sev, "confidence", None)
+    desc = getattr(sev, "description", "")
+    print(f'  SecurityEvent: {sev_id} | {ev_type} at {ts}s (dur={dur}s, conf={conf})')
+    print(f'    Desc: {desc}')
+

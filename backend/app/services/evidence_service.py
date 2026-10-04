@@ -181,6 +181,22 @@ class EvidenceService:
                             effective_ts = sec_ev.timestamp_seconds
                             start_time = sec_ev.timestamp_seconds
                             end_time = sec_ev.timestamp_seconds + (sec_ev.duration_seconds or 0.0)
+
+                            # If timestamp is at or near 0.0 but evidence candidates or representative timestamps exist, use canonical event timestamp
+                            sec_meta = getattr(sec_ev, "incident_metadata", {}) or {}
+                            ev_cands = sec_meta.get("evidence_candidates") or []
+                            if effective_ts <= 0.05 and ev_cands:
+                                cand_ts = ev_cands[0].get("timestamp")
+                                if cand_ts is not None and float(cand_ts) > 0.0:
+                                    effective_ts = float(cand_ts)
+                                    start_time = max(0.0, effective_ts - 2.0)
+                                    end_time = effective_ts + max(2.0, sec_ev.duration_seconds or 3.0)
+                            elif effective_ts <= 0.05 and sec_meta.get("representative_timestamps"):
+                                rep_ts = [float(t) for t in sec_meta["representative_timestamps"] if float(t) > 0.0]
+                                if rep_ts:
+                                    effective_ts = rep_ts[0]
+                                    start_time = max(0.0, effective_ts - 2.0)
+                                    end_time = effective_ts + max(2.0, sec_ev.duration_seconds or 3.0)
                         else:
                             from database.models import SpecializedObservationModel
                             spec_obs = db.query(SpecializedObservationModel).filter(SpecializedObservationModel.id == event_id).first()
@@ -408,8 +424,8 @@ class EvidenceService:
                         cmd = [
                             ffmpeg_exe, "-y",
                             "-ss", f"{c_start:.3f}",
-                            "-to", f"{c_end:.3f}",
                             "-i", str(video_path),
+                            "-t", f"{clip_duration:.3f}",
                             "-c:v", "libx264",
                             "-pix_fmt", "yuv420p",
                             "-preset", "veryfast",

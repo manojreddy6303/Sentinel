@@ -258,8 +258,22 @@ class IncidentFusionEngine:
         )
         merged_decision = "REVIEW_REQUIRED" if has_review else getattr(lead, "validation_decision", "ACCEPTED")
         merged_human_req = True if (has_review or getattr(lead, "human_verification_required", False)) else False
+
+        # Canonical score reconciliation across cluster
+        max_pattern_strength = max(getattr(c, "pattern_evidence_strength", c.confidence) for c in cluster)
         if str(merged_decision).upper() in ("REVIEW_REQUIRED", "VALIDATIONDECISION.REVIEW_REQUIRED"):
             max_conf = min(max_conf, 0.65)
+            merged_assessment = min(0.65, max(getattr(c, "assessment_score", c.confidence) for c in cluster))
+        else:
+            merged_assessment = max(getattr(c, "assessment_score", c.confidence) for c in cluster)
+
+        merged_meta["pattern_evidence_strength"] = max_pattern_strength
+        merged_meta["assessment_score"] = merged_assessment
+        merged_meta["validation_decision"] = merged_decision
+
+        # Harmonize explanation string to eliminate contradictory score/decision text
+        if merged_decision == "REVIEW_REQUIRED" and "(ACCEPTED)" in explanation:
+            explanation = explanation.replace("(ACCEPTED)", "(REVIEW_REQUIRED)")
 
         return IncidentCandidate(
             incident_id=f"FUSED-{uuid.uuid4().hex[:8]}",
@@ -270,7 +284,9 @@ class IncidentFusionEngine:
             end_time=end_t,
             duration=duration,
             severity=sev,
-            confidence=max_conf,
+            confidence=merged_assessment,
+            pattern_evidence_strength=max_pattern_strength,
+            assessment_score=merged_assessment,
             track_ids=all_tracks,
             object_classes=all_classes,
             source_detection_ids=all_detection_ids,

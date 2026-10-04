@@ -63,68 +63,152 @@ class GeminiProvider(LLMProvider):
     """
 
     DEFAULT_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+    FALLBACK_CANDIDATE_MODELS = [
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-flash-lite-latest",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest",
+    ]
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gemini-flash-latest",
+        model: str = "gemini-3.5-flash-lite",
         temperature: float = 0.1,
         timeout: float = 30.0,
     ):
         self.api_key = (api_key or "").strip()
-        self.model = model or "gemini-flash-latest"
+        self.model = model or "gemini-3.5-flash-lite"
         self.temperature = temperature
         self.timeout = timeout
+        self.last_status: Dict[str, Any] = {
+            "provider": "gemini",
+            "model": self.model,
+            "request_status": "ready" if self.api_key else "missing_key",
+            "response_status": 200 if self.api_key else None,
+            "failure_reason": None if self.api_key else "missing_api_key",
+            "fallback_reason": None,
+        }
 
     def is_available(self) -> bool:
         return bool(self.api_key)
 
+    def get_diagnostics(self) -> Dict[str, Any]:
+        return dict(self.last_status)
+
     def _call_gemini(self, prompt: str, system_instruction: Optional[str] = None, json_mode: bool = False) -> str:
         if not self.api_key:
+            self.last_status.update({
+                "request_status": "failed",
+                "failure_reason": "missing_api_key",
+                "fallback_reason": "deterministic_grounded_fallback",
+            })
             raise LLMProviderError("Gemini API key is not configured.")
 
-        url = f"{self.DEFAULT_API_BASE}/models/{self.model}:generateContent?key={self.api_key}"
+        # Candidate models list starting with configured model, followed by fallback candidates
+        candidate_models = [self.model]
+        for fb_model in self.FALLBACK_CANDIDATE_MODELS:
+            if fb_model not in candidate_models:
+                candidate_models.append(fb_model)
 
-        contents = [{"parts": [{"text": prompt}]}]
-        body: Dict[str, Any] = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": 1024,
-            },
-        }
+        last_error_code: Optional[int] = None
+        last_error_text: str = ""
+        last_failure_type: str = "unknown_error"
 
-        if json_mode:
-            body["generationConfig"]["responseMimeType"] = "application/json"
+        for cur_model in candidate_models:
+            url = f"{self.DEFAULT_API_BASE}/models/{cur_model}:generateContent?key={self.api_key}"
 
-        if system_instruction:
-            body["systemInstruction"] = {
-                "parts": [{"text": system_instruction}]
+            contents = [{"parts": [{"text": prompt}]}]
+            body: Dict[str, Any] = {
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": self.temperature,
+                    "maxOutputTokens": 1024,
+                },
             }
 
-        try:
-            resp = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=body,
-                timeout=self.timeout,
-            )
-            if resp.status_code != 200:
-                raise LLMProviderError(f"Gemini API error ({resp.status_code}): {resp.text}")
+            if json_mode:
+                body["generationConfig"]["responseMimeType"] = "application/json"
 
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise LLMProviderError("No response candidates returned by Gemini.")
+            if system_instruction:
+                body["systemInstruction"] = {
+                    "parts": [{"text": system_instruction}]
+                }
 
-            content_parts = candidates[0].get("content", {}).get("parts", [])
-            if not content_parts:
-                raise LLMProviderError("Empty content returned by Gemini.")
+            try:
+                resp = requests.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json=body,
+                    timeout=self.timeout,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if not candidates:
+                        raise LLMProviderError("No response candidates returned by Gemini.")
 
-            return content_parts[0].get("text", "")
-        except requests.RequestException as e:
-            logger.error(f"Gemini HTTP request failed: {e}")
-            raise LLMProviderError(f"Gemini connection failure: {str(e)}")
+                    content_parts = candidates[0].get("content", {}).get("parts", [])
+                    if not content_parts:
+                        raise LLMProviderError("Empty content returned by Gemini.")
+
+                    # Successfully received response
+                    self.model = cur_model
+                    self.last_status = {
+                        "provider": "gemini",
+                        "model": cur_model,
+                        "request_status": "success",
+                        "response_status": 200,
+                        "failure_reason": None,
+                        "fallback_reason": None,
+                    }
+                    return content_parts[0].get("text", "")
+
+                last_error_code = resp.status_code
+                last_error_text = resp.text[:300]
+                if resp.status_code in (401, 403):
+                    last_failure_type = "authentication_error"
+                    # Auth error won't be resolved by trying another model with same key
+                    break
+                elif resp.status_code == 429:
+                    last_failure_type = "quota_exceeded"
+                    logger.warning(f"Gemini model '{cur_model}' quota exceeded (429). Attempting fallback model...")
+                    continue
+                elif resp.status_code == 404:
+                    last_failure_type = "model_unavailable"
+                    logger.warning(f"Gemini model '{cur_model}' not found (404). Attempting fallback model...")
+                    continue
+                elif resp.status_code in (500, 502, 503, 504):
+                    last_failure_type = "transient_service_error"
+                    logger.warning(f"Gemini model '{cur_model}' service error ({resp.status_code}). Attempting fallback model...")
+                    continue
+                else:
+                    last_failure_type = f"http_{resp.status_code}"
+                    break
+
+            except requests.Timeout as te:
+                last_failure_type = "timeout"
+                last_error_text = str(te)
+                logger.warning(f"Gemini request timeout on model '{cur_model}'.")
+                continue
+            except requests.RequestException as re_err:
+                last_failure_type = "connection_failure"
+                last_error_text = str(re_err)
+                logger.error(f"Gemini HTTP connection failed: {re_err}")
+                break
+
+        # If loop finishes without returning, record diagnostic and raise error
+        self.last_status = {
+            "provider": "gemini",
+            "model": self.model,
+            "request_status": "failed",
+            "response_status": last_error_code,
+            "failure_reason": last_failure_type,
+            "fallback_reason": "deterministic_grounded_fallback",
+            "error_details": last_error_text,
+        }
+        raise LLMProviderError(f"Gemini API error ({last_error_code or last_failure_type}): {last_failure_type}")
 
     def generate_structured_intent(
         self, user_query: str, history: Optional[List[Dict[str, str]]] = None
@@ -148,7 +232,10 @@ class GeminiProvider(LLMProvider):
             "- Only use recognized classes: person, car, bicycle, motorcycle, bus, truck, backpack, handbag, suitcase, bottle, cell phone, chair, traffic light, stop sign.\n"
             "- Map 'vehicle' to object_classes=['car','bus','truck','motorcycle','bicycle'].\n"
             "- Do not infer colors.\n"
-            "- If user asks who someone is, mark intent='guardrail', guardrail_category='identity'.\n"
+            "- Inquiries about whether objects were taken, potential theft patterns, or takeaways (e.g. 'Was anything taken?', 'What was taken?', 'Was there a takeaway?') are VALID observable security event investigations. Set intent='investigate', result_type='events'. DO NOT flag as guardrail.\n"
+            "- Inquiries asking what a person/lady/man did or their actions/movements (e.g. 'What did the blue colour lady do?', 'What did the person do?', 'What did the man do?') are VALID visual activity inquiries. Set intent='investigate', object_classes=['person'], result_type='events'. DO NOT flag as guardrail.\n"
+            "- ONLY mark intent='guardrail', guardrail_category='identity' if user asks who someone is by name, asks for their personal identity, or demands facial recognition biometric matching.\n"
+            "- If user demands a legal court verdict or legal guilt conviction, mark intent='guardrail', guardrail_category='criminal_attribution'.\n"
             "- If user asks about summary/overview, set is_summary_request=true.\n"
             "- If user asks about activity/movement density/suspicious patterns, set is_activity_request=true."
         )
@@ -553,7 +640,7 @@ def get_llm_provider(
 
     prov = (provider_name or getattr(settings, "LLM_PROVIDER", "deterministic") or "deterministic").lower()
     key = api_key if api_key is not None else getattr(settings, "LLM_API_KEY", None)
-    mdl = model or getattr(settings, "LLM_MODEL", "gemini-flash-latest")
+    mdl = model or getattr(settings, "LLM_MODEL", "gemini-3.5-flash-lite")
 
     if prov == "mock":
         return MockLLMProvider()

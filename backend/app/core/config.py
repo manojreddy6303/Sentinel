@@ -201,7 +201,7 @@ class Settings:
     # -------------------------------------------------------------------------
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "gemini")
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", os.getenv("GEMINI_API_KEY", ""))
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-flash-latest")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-3.5-flash-lite")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 
     # -------------------------------------------------------------------------

@@ -357,13 +357,32 @@ class InvestigationService:
         rows = q.order_by(TrackModel.first_seen.asc()).all()
         results = []
         for r in rows:
-            # Query security events associated with this track in this video
-            sec_events = (
+            # Query security events associated with this track in this video (direct or fused multi-track)
+            all_video_sec_events = (
                 db.query(SecurityEventModel)
-                .filter(SecurityEventModel.video_id == video_id, SecurityEventModel.track_id == r.track_id)
+                .filter(SecurityEventModel.video_id == video_id)
                 .order_by(SecurityEventModel.timestamp_seconds.asc())
                 .all()
             )
+            sec_events = []
+            for se in all_video_sec_events:
+                tids = []
+                if se.track_id:
+                    tids.append(se.track_id)
+                meta = se.incident_metadata or {}
+                if isinstance(meta, dict) and "track_ids" in meta and isinstance(meta["track_ids"], list):
+                    tids.extend(meta["track_ids"])
+                s_ctx = meta.get("spatial_context") if isinstance(meta, dict) else None
+                if isinstance(s_ctx, dict) and "metadata" in s_ctx:
+                    p_tid = s_ctx["metadata"].get("person_track_id")
+                    if p_tid:
+                        tids.append(p_tid)
+                bbox = se.bounding_box or {}
+                if isinstance(bbox, dict) and bbox.get("person_track_id"):
+                    tids.append(bbox.get("person_track_id"))
+                if r.track_id in tids:
+                    sec_events.append(se)
+
             sec_event_list = [
                 {
                     "event_type": se.event_type,
@@ -376,15 +395,51 @@ class InvestigationService:
 
             # Factual observational movement and activity summary (zero biometric attribution)
             dur_str = f"{round(r.duration_seconds, 1)}s"
-            act_summary = (
-                f"Continuous visual presence observed from {round(r.first_seen, 1)}s to {round(r.last_seen, 1)}s "
-                f"across {r.detection_count} detections (duration: {dur_str})."
-            )
-            if sec_event_list:
+            theft_ev = next((se for se in sec_events if se.event_type == "POTENTIAL_THEFT"), None)
+            fall_ev = next((se for se in sec_events if se.event_type == "POTENTIAL_PERSON_FALL"), None)
+            loit_ev = next((se for se in sec_events if se.event_type == "PROLONGED_PRESENCE"), None)
+            color_desc = f"with {r.color} clothing " if r.color else ""
+
+            if theft_ev:
+                meta = theft_ev.incident_metadata or {}
+                s_ctx = meta.get("spatial_context") if isinstance(meta, dict) else None
+                o_tid = ""
+                o_cls = "portable object"
+                if isinstance(s_ctx, dict) and "metadata" in s_ctx:
+                    o_tid = s_ctx["metadata"].get("object_track_id", "")
+                    o_cls_raw = s_ctx["metadata"].get("object_class")
+                    if o_cls_raw and o_cls_raw != "person":
+                        o_cls = o_cls_raw.replace("_", " ")
+                if not o_tid and isinstance(theft_ev.bounding_box, dict):
+                    o_tid = theft_ev.bounding_box.get("object_track_id", "")
+                obj_str = f"{o_cls} ({o_tid})" if o_tid else f"{o_cls}"
+                act_summary = (
+                    f"The person {color_desc}({r.track_id}) was observed interacting with a {obj_str}. "
+                    f"The object subsequently moved with the departing person. "
+                    f"This produced a potential takeaway/theft pattern. Human review is required."
+                )
+            elif fall_ev:
+                act_summary = (
+                    f"The person {color_desc}({r.track_id}) exhibited rapid downward descent and aspect-ratio change around {fall_ev.timestamp_seconds:.1f}s. "
+                    f"Potential person fall pattern. Human review is required."
+                )
+            elif loit_ev:
+                act_summary = (
+                    f"The individual {color_desc}({r.track_id}) remained stationary in a localized area for {r.duration_seconds:.1f}s. "
+                    f"Prolonged presence pattern observed."
+                )
+            elif sec_event_list:
                 ev_names = ", ".join(sorted(set(se["event_type"] for se in sec_event_list)))
-                act_summary += f" Associated security event(s): {ev_names}."
+                act_summary = (
+                    f"Continuous visual presence observed from {round(r.first_seen, 1)}s to {round(r.last_seen, 1)}s "
+                    f"across {r.detection_count} detections (duration: {dur_str}). Associated security event(s): {ev_names}."
+                )
             else:
-                act_summary += " No security infractions, loitering, or suspicious security alerts were recorded for this track."
+                act_summary = (
+                    f"The person {color_desc}({r.track_id}) was observed moving through the scene from {round(r.first_seen, 1)}s to {round(r.last_seen, 1)}s "
+                    f"across {r.detection_count} detections (duration: {dur_str}). "
+                    f"No security infractions, loitering, or suspicious activity patterns were recorded for this track."
+                )
 
             results.append({
                 "track_id": r.track_id,

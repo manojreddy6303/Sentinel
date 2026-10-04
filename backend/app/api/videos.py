@@ -590,6 +590,14 @@ def _correlate_security_evidence(video_id: str, security_events: List[Any]) -> N
                 ts = getattr(s_ev, "timestamp", None) or (s_ev.get("timestamp") if isinstance(s_ev, dict) else 0.0)
                 desc = getattr(s_ev, "description", "") or (s_ev.get("description", "") if isinstance(s_ev, dict) else "")
 
+                # Check if evidence candidate provides canonical non-zero timestamp
+                meta = getattr(s_ev, "incident_metadata", None) or (s_ev.get("incident_metadata") if isinstance(s_ev, dict) else {}) or {}
+                ev_cands = meta.get("evidence_candidates") or []
+                if (ts is None or float(ts) <= 0.05) and ev_cands:
+                    cand_ts = ev_cands[0].get("timestamp")
+                    if cand_ts is not None and float(cand_ts) > 0.0:
+                        ts = float(cand_ts)
+
                 # Idempotency check: don't create duplicate evidence if one already exists
                 db_dup = SessionLocal()
                 existing_ev = None

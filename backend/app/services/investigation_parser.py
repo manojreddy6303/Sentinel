@@ -333,7 +333,16 @@ class InvestigationParser:
                 },
             }
 
-        if re.search(r"\b(object\s+displacements?|displaced\s+objects?|moved\s+objects?)\b", cleaned):
+        if re.search(r"\b(which\s+events?\s+should\s+i\s+review|what\s+should\s+i\s+review|events?\s+to\s+review|review\s+required\s+events?)\b", cleaned):
+            return {
+                "is_supported": True,
+                "result_type": "security_events",
+                "interpreted_filters": {
+                    "validation_decision": "REVIEW_REQUIRED",
+                },
+            }
+
+        if re.search(r"\b(objects?\s+moved|moved\s+objects?|moving\s+objects?|displaced\s+objects?|objects?\s+displaced|object\s+displacements?)\b", cleaned):
             return {
                 "is_supported": True,
                 "result_type": "security_events",
@@ -369,7 +378,7 @@ class InvestigationParser:
                 },
             }
 
-        if re.search(r"\b(theft\s+patterns?|theft\s+events?|possible\s+thefts?|thefts?|stealing|stolen|what\s+was\s+stolen|object\s+takeaways?|takeaway\s+patterns?|burglary)\b", cleaned):
+        if re.search(r"\b(theft\s+patterns?|theft\s+events?|possible\s+thefts?|thefts?|stealing|stolen|what\s+was\s+stolen|object\s+takeaways?|takeaway\s+patterns?|takeaways?|burglary|taken|what\s+was\s+taken|was\s+anything\s+taken|did\s+anyone\s+take|anything\s+taken)\b", cleaned):
             t_start, t_end, c_min, c_max = InvestigationParser._extract_time_and_conf(cleaned)
             filters: Dict[str, Any] = {"event_type": "POTENTIAL_THEFT"}
             if t_start is not None:
@@ -749,7 +758,7 @@ class InvestigationParser:
         result_type = "detections"
         if re.search(r"\b(how\s+many|count|total\s+number)\b", cleaned):
             result_type = "count"
-        elif re.search(r"\b(events?|timeline|activities|activity)\b", cleaned) and not re.search(r"\b(detections?|objects?)\b", cleaned):
+        elif re.search(r"\b(events?|timeline|activities|activity|happened|occurred)\b", cleaned) and not re.search(r"\b(detections?|objects?)\b", cleaned):
             result_type = "events"
 
         # 3. Parse Object Class

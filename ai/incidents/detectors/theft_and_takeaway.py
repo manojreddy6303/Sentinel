@@ -207,11 +207,19 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
 
                 pattern_type = "object_disappearance" if is_disappeared else "co_movement_takeaway"
                 duration_total = round(p_track.last_seen - interaction_start, 2)
+                takeaway_timestamp = round(o_track.last_seen if is_disappeared else interaction_end, 2)
+                event_start = max(0.0, round(max(interaction_start, takeaway_timestamp - min(interaction_duration, 5.0)), 2))
+                event_end = round(min(p_track.last_seen, max(event_start + 2.0, takeaway_timestamp + 3.0)), 2)
 
-                # Ground coordinates
-                p_bbox, p_obs_ts, _ = self._find_closest_bbox_observation(p_track, interaction_start, max_tolerance=3.0)
+                # Ground coordinates around the takeaway moment
+                p_bbox, p_obs_ts, _ = self._find_closest_bbox_observation(p_track, takeaway_timestamp, max_tolerance=3.0)
+                if not p_bbox:
+                    p_bbox, p_obs_ts, _ = self._find_closest_bbox_observation(p_track, interaction_start, max_tolerance=3.0)
+
                 o_max_tol = max(3.0, interaction_duration + self.object_loss_window + 5.0)
-                o_bbox, o_obs_ts, is_prior_o = self._find_closest_bbox_observation(o_track, interaction_start, max_tolerance=o_max_tol)
+                o_bbox, o_obs_ts, is_prior_o = self._find_closest_bbox_observation(o_track, takeaway_timestamp, max_tolerance=o_max_tol)
+                if not o_bbox:
+                    o_bbox, o_obs_ts, is_prior_o = self._find_closest_bbox_observation(o_track, interaction_start, max_tolerance=o_max_tol)
 
                 active_o_bbox = o_bbox if (o_bbox is not None and o_obs_ts is not None) else None
 
@@ -227,7 +235,7 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                         signal_type="Takeaway Pattern",
                         description=f"Pattern: {pattern_type} (person departure displacement: {max_departure_disp:.1f}px)",
                         confidence=0.88,
-                        timestamp=interaction_end,
+                        timestamp=takeaway_timestamp,
                         track_id=p_track.track_id,
                     ),
                 ]
@@ -267,6 +275,7 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                     expected_duration_threshold=self.min_interaction_seconds,
                     contradictory_signals=neg_signals,
                     incident_type="POTENTIAL_THEFT",
+                    validation_decision="REVIEW_REQUIRED",
                 )
 
                 spatial_ctx = SpatialContext(
@@ -287,8 +296,8 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                 cand = self.build_candidate(
                     video_id=context.video_id,
                     event_type="POTENTIAL_THEFT",
-                    start_time=interaction_start,
-                    end_time=p_track.last_seen,
+                    start_time=event_start,
+                    end_time=event_end,
                     severity="HIGH",
                     confidence=scoring["score"],
                     explanation=(
@@ -304,16 +313,18 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                     spatial_context=spatial_ctx,
                     evidence_candidates=[
                         EvidenceCandidate(
-                            timestamp=interaction_start,
+                            timestamp=takeaway_timestamp,
                             bounding_box=p_bbox,
                             target_track_id=p_track.track_id,
-                            reason="Suspected object takeaway interaction start",
+                            reason=f"Suspected object takeaway ({pattern_type}) at {takeaway_timestamp:.1f}s",
                         )
                     ],
                     pattern_evidence_strength=scoring.get("pattern_strength", scoring["score"]),
                     assessment_score=scoring["score"],
                     prefix="THEFT",
                 )
+                cand.validation_decision = "REVIEW_REQUIRED"
+                cand.human_verification_required = True
                 candidates.append(cand)
 
         return candidates

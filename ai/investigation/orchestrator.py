@@ -690,6 +690,7 @@ class InvestigationOrchestrator:
                 "events": event_sources,
                 "evidence": matched_evidence,
             },
+            "diagnostics": self.provider.get_diagnostics() if hasattr(self.provider, "get_diagnostics") else {},
             "limitations": [STANDARD_LIMITATION],
         }
 
@@ -847,13 +848,18 @@ class InvestigationOrchestrator:
             det_cnt = first.get("detection_count", 1)
             act_sum = first.get("activity_summary", "")
 
+            if act_sum:
+                prefix = f"Track {trk_id} ({obj_cls}{color_desc}): " if trk_id not in act_sum else ""
+                return (
+                    f"{prefix}{act_sum} (Observed from {f_seen:.1f}s to {l_seen:.1f}s across {det_cnt} detections. "
+                    f"Note: Observational tracking only; zero personal identity attribution or biometric identification)."
+                )
+
             lines = [
                 f"Found {count} verified track(s) for {obj_cls}{color_desc} ({trk_id}).",
                 f"The individual was observed from {f_seen:.1f}s to {l_seen:.1f}s ({dur:.1f}s duration, {det_cnt} detections).",
+                "(Note: Observational tracking only; zero personal identity attribution or biometric identification).",
             ]
-            if act_sum:
-                lines.append(f"Activity: {act_sum}")
-            lines.append("(Note: Observational tracking only; zero personal identity attribution or biometric identification).")
             return " ".join(lines)
 
         if count == 0:
@@ -862,6 +868,31 @@ class InvestigationOrchestrator:
             if "vehicle" in clean_target:
                 return "Search executed successfully. No validated vehicle detections were found in this investigation."
             return f"Search executed successfully. No validated {clean_target} observations were found in this investigation."
+
+        # If results contain structured security events, format canonical multi-signal incident summaries
+        has_sec_events = any(r.get("event_type") for r in results)
+        if has_sec_events:
+            ev_summaries = []
+            for r in results[:4]:
+                ev_t = r.get("event_type", "INCIDENT")
+                ts = r.get("timestamp") if r.get("timestamp") is not None else r.get("start_time", 0.0)
+                dur = r.get("duration_seconds") or 0.0
+                desc = r.get("description") or f"{ev_t.replace('_', ' ')} observed"
+                score = r.get("confidence") or r.get("assessment_score") or 0.65
+                score_pct = int(round(score * 100))
+                time_str = f"[{ts:.1f}s – {ts + dur:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
+                val_dec = r.get("validation_decision") or ("REVIEW_REQUIRED" if score <= 0.65 else "ACCEPTED")
+                ev_summaries.append(
+                    f"• {ev_t.replace('_', ' ')} ({time_str}, {score_pct}% {val_dec}): {desc}"
+                )
+            answer_parts = [
+                f"Sentinel identified {count} verified security event(s){time_desc}:",
+                "\n".join(ev_summaries),
+            ]
+            if evidence:
+                answer_parts.append(f"Preserved evidence is available ({len(evidence)} forensic record(s) with snapshot and video clip).")
+            answer_parts.append("(Human review recommended; Sentinel reports observational patterns and does not establish legal culpability).")
+            return "\n\n".join(answer_parts)
 
         obj_class = filters.get("object_class") or "detected object"
         time_desc = ""
