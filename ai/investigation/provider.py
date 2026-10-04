@@ -313,7 +313,7 @@ class MockLLMProvider(LLMProvider):
             }
 
         # Phase 8: Security events review
-        if any(term in q for term in ["which events", "review", "security events", "what happened"]):
+        if any(term in q for term in ["which events", "review", "security events"]):
             return {
                 "intent": "investigate",
                 "object_classes": None,
@@ -402,7 +402,7 @@ class MockLLMProvider(LLMProvider):
                     "- Preserved evidence is available for review.",
                     "",
                     "### OBSERVED EVIDENCE",
-                    f"- **Security Event:** Potential Theft Pattern (potential object-takeaway) detected around {ts:.1f}s.",
+                    f"- **Security Event:** Potential Theft Pattern (potential object-takeaway pattern) detected around {ts:.1f}s.",
                     f"- **Telemetry & Observation:** {desc}" if desc else f"- **Telemetry & Observation:** Object proximity and interaction observed around {ts:.1f}s.",
                     f"- **Preserved Records:** {len(evidence)} forensic artifact(s) registered in vault." if evidence else "- **Preserved Records:** Validated evidence snapshot and clip available for review.",
                     "",

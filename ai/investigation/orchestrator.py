@@ -813,7 +813,7 @@ class InvestigationOrchestrator:
                     "- Preserved evidence is available for review.",
                     "",
                     "### OBSERVED EVIDENCE",
-                    f"- **Security Event:** Potential Theft Pattern (potential object-takeaway) detected around {ts:.1f}s.",
+                    f"- **Security Event:** Potential Theft Pattern (potential object-takeaway pattern) detected around {ts:.1f}s.",
                     f"- **Visual Telemetry:** {desc}" if desc else f"- **Visual Telemetry:** Object proximity and interaction observed around {ts:.1f}s.",
                     f"- **Preserved Records:** {len(evidence)} forensic artifact(s) registered in vault." if evidence else "- **Preserved Records:** Validated evidence snapshot and clip available for review.",
                     "",
