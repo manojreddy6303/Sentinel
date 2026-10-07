@@ -168,20 +168,38 @@ class IncidentFusionEngine:
         else:
             sev = "LOW"
 
-        # Union track IDs & object classes
-        all_tracks: List[str] = []
-        all_classes: List[str] = []
+        # Union track IDs & object classes, preserving lead candidate's primary tracks
+        primary_tracks = list(lead.track_ids or [])
+        secondary_tracks: List[str] = []
+        all_classes: List[str] = list(lead.object_classes or [])
         all_detection_ids: List[str] = []
         for c in cluster:
-            for tid in c.track_ids:
-                if tid not in all_tracks:
-                    all_tracks.append(tid)
-            for cls in c.object_classes:
+            for tid in (c.track_ids or []):
+                if tid not in primary_tracks and tid not in secondary_tracks:
+                    secondary_tracks.append(tid)
+            for cls in (c.object_classes or []):
                 if cls not in all_classes:
                     all_classes.append(cls)
-            for did in c.source_detection_ids:
+            for did in (c.source_detection_ids or []):
                 if did not in all_detection_ids:
                     all_detection_ids.append(did)
+
+        # Initialize metadata dictionary for fused incident
+        merged_meta: Dict[str, Any] = {}
+
+        # For property / theft events, preserve primary actor identity strictly
+        is_property_or_theft = (
+            getattr(lead, "category", "") == "property"
+            or "THEFT" in lead.event_type
+            or "TAKEAWAY" in lead.event_type
+        )
+        if is_property_or_theft:
+            assigned_tracks = primary_tracks
+            merged_meta["primary_tracks"] = primary_tracks
+            merged_meta["secondary_tracks"] = secondary_tracks
+            merged_meta["track_ids"] = primary_tracks
+        else:
+            assigned_tracks = primary_tracks + secondary_tracks
 
         # Union supporting signals avoiding exact duplicates
         merged_signals: List[SupportingSignal] = []
@@ -212,7 +230,6 @@ class IncidentFusionEngine:
         spatial_ctx = lead.spatial_context
         temporal_ctx = lead.temporal_context
         # Merge metadata (observation counts, episode IDs, supporting observation IDs)
-        merged_meta: Dict[str, Any] = {}
         total_obs_count = 0
         total_seg_count = 0
         merged_supp_obs_ids: List[str] = []
@@ -287,7 +304,7 @@ class IncidentFusionEngine:
             confidence=merged_assessment,
             pattern_evidence_strength=max_pattern_strength,
             assessment_score=merged_assessment,
-            track_ids=all_tracks,
+            track_ids=assigned_tracks,
             object_classes=all_classes,
             source_detection_ids=all_detection_ids,
             supporting_signals=merged_signals,
@@ -471,9 +488,28 @@ class IncidentFusionEngine:
                 primary = cl_sorted[0]
                 alternates = [c.event_type for c in cl_sorted[1:]]
 
+                # Primary actor tracks from winning candidate; secondary tracks preserved in metadata
+                primary_tracks = list(primary.track_ids or [])
+                all_object_classes = list(primary.object_classes or [])
+                secondary_tracks = []
+                for c in cl_sorted[1:]:
+                    for tid in (c.track_ids or []):
+                        if tid not in primary_tracks and tid not in secondary_tracks:
+                            secondary_tracks.append(tid)
+                    for ocls in (c.object_classes or []):
+                        if ocls not in all_object_classes:
+                            all_object_classes.append(ocls)
+
+                primary.track_ids = primary_tracks
+                primary.object_classes = all_object_classes
+
                 if primary.incident_metadata is None:
                     primary.incident_metadata = {}
                 primary.incident_metadata["alternate_hypotheses"] = alternates
+                primary.incident_metadata["track_ids"] = primary_tracks
+                primary.incident_metadata["primary_tracks"] = primary_tracks
+                primary.incident_metadata["secondary_tracks"] = secondary_tracks
+                primary.incident_metadata["object_classes"] = all_object_classes
                 primary.validation_decision = ValidationDecision.REVIEW_REQUIRED
                 primary.human_verification_required = True
                 arbitrated.append(primary)

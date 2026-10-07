@@ -268,6 +268,8 @@ class Settings:
         os.getenv("CORRELATION_TEMPORAL_COOLDOWN_SECONDS", "5.0")
     )
 
+    # Playback transcoding thread limit
+    FFMPEG_TRANSCODE_THREADS: int = int(os.getenv("FFMPEG_TRANSCODE_THREADS", "1"))
 
 settings = Settings()
 

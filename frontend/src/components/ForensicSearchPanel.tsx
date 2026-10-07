@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   UnifiedTimelineEntry,
   InvestigationResult,
@@ -72,6 +72,32 @@ export function ForensicSearchPanel({
   const [isCreatingBundle, setIsCreatingBundle] = useState<boolean>(false);
   const [bundleMessage, setBundleMessage] = useState<string | null>(null);
 
+  // Cross-video state isolation: every result held by this panel belongs to exactly one videoId.
+  // The ref always holds the CURRENT videoId so async responses for a previous video are discarded.
+  const currentVideoIdRef = useRef<string>(videoId);
+  currentVideoIdRef.current = videoId;
+  const isStaleVideo = (requestedVideoId: string) => currentVideoIdRef.current !== requestedVideoId;
+
+  useEffect(() => {
+    // Explicit lifecycle reset of all video-scoped state when the investigated video changes.
+    setSearchQuery("");
+    setIsSearching(false);
+    setSearchResult(null);
+    setSearchError(null);
+    setTimelineEntries([]);
+    setTimelineCounts({ detection_events: 0, security_events: 0, correlated_incidents: 0, evidence: 0 });
+    setSelectedTrackId("");
+    setTrackResult(null);
+    setIsTrackLoading(false);
+    setTrackError(null);
+    setBundles([]);
+    setBundleName("");
+    setBundleNotes("");
+    setBundleMessage(null);
+    // If the user was viewing a track of the previous video, return to search (track IDs are per-video).
+    setActiveSubTab((prev) => (prev === "track" ? "search" : prev));
+  }, [videoId]);
+
   // Quick prompt suggestions
   const QUICK_QUERIES = [
     "What vehicles were detected?",
@@ -86,22 +112,26 @@ export function ForensicSearchPanel({
     const q = queryText !== undefined ? queryText : searchQuery;
     if (!q.trim() || !videoId) return;
 
+    const requestedVideoId = videoId;
     setIsSearching(true);
     setSearchError(null);
     try {
-      const res = await investigationSearch(videoId, q, videoDuration);
+      const res = await investigationSearch(requestedVideoId, q, videoDuration);
+      if (isStaleVideo(requestedVideoId)) return;
       setSearchResult(res);
     } catch (err: unknown) {
+      if (isStaleVideo(requestedVideoId)) return;
       const msg = err instanceof Error ? err.message : "Search failed";
       setSearchError(msg);
     } finally {
-      setIsSearching(false);
+      if (!isStaleVideo(requestedVideoId)) setIsSearching(false);
     }
   };
 
   // Execute Structured Query
   const handleStructuredQuery = async () => {
     if (!videoId) return;
+    const requestedVideoId = videoId;
     setIsSearching(true);
     setSearchError(null);
     try {
@@ -130,27 +160,31 @@ export function ForensicSearchPanel({
         req.time_end = parseFloat(timeEnd);
       }
 
-      const res = await investigationStructuredQuery(videoId, req);
+      const res = await investigationStructuredQuery(requestedVideoId, req);
+      if (isStaleVideo(requestedVideoId)) return;
       setSearchResult(res);
     } catch (err: unknown) {
+      if (isStaleVideo(requestedVideoId)) return;
       const msg = err instanceof Error ? err.message : "Query failed";
       setSearchError(msg);
     } finally {
-      setIsSearching(false);
+      if (!isStaleVideo(requestedVideoId)) setIsSearching(false);
     }
   };
 
   // Fetch Unified Forensic Timeline
   const fetchTimeline = useCallback(async () => {
     if (!videoId) return;
+    const requestedVideoId = videoId;
     setTimelineLoading(true);
     try {
       const res = await getInvestigationTimeline(
-        videoId,
+        requestedVideoId,
         undefined,
         undefined,
         includeRejectedTimeline
       );
+      if (isStaleVideo(requestedVideoId)) return;
       setTimelineEntries(res.timeline || []);
       if (res.layer_counts) {
         setTimelineCounts(res.layer_counts);
@@ -166,27 +200,32 @@ export function ForensicSearchPanel({
   const handleInvestigateTrack = async (tId?: string) => {
     const id = tId || selectedTrackId;
     if (!id.trim() || !videoId) return;
+    const requestedVideoId = videoId;
     setSelectedTrackId(id);
     setActiveSubTab("track");
     setIsTrackLoading(true);
     setTrackError(null);
     try {
-      const res = await investigationTrack(videoId, id.trim());
+      const res = await investigationTrack(requestedVideoId, id.trim());
+      if (isStaleVideo(requestedVideoId)) return;
       setTrackResult(res);
     } catch (err: unknown) {
+      if (isStaleVideo(requestedVideoId)) return;
       const msg = err instanceof Error ? err.message : "Track investigation failed";
       setTrackError(msg);
     } finally {
-      setIsTrackLoading(false);
+      if (!isStaleVideo(requestedVideoId)) setIsTrackLoading(false);
     }
   };
 
   // Fetch Bundles
   const fetchBundles = useCallback(async () => {
     if (!videoId) return;
+    const requestedVideoId = videoId;
     setIsBundlesLoading(true);
     try {
-      const res = await listBundles(videoId);
+      const res = await listBundles(requestedVideoId);
+      if (isStaleVideo(requestedVideoId)) return;
       setBundles(res.bundles || []);
     } catch {
       // ignore

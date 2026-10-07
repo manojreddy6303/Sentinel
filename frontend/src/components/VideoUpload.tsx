@@ -171,6 +171,11 @@ export default function VideoUpload({
   const [timelineEvents, setTimelineEvents] = useState<GroupedEvent[]>([]);
   const [activeView, setActiveView] = useState<ViewMode>(initialViewMode || "timeline");
 
+  // Cross-video state isolation: id of the video whose data this workspace is currently allowed to show.
+  // Async responses for any other video id are discarded (see isStaleVideo).
+  const activeVideoIdRef = useRef<string | null>(null);
+  const isStaleVideo = (requestedVideoId: string) => activeVideoIdRef.current !== requestedVideoId;
+
   useEffect(() => {
     if (initialViewMode) {
       setActiveView(initialViewMode);
@@ -203,6 +208,7 @@ export default function VideoUpload({
   const fetchEvidence = async (videoId: string) => {
     try {
       const res = await getVideoEvidence(videoId);
+      if (isStaleVideo(videoId)) return;
       setEvidenceList(res.evidence);
     } catch {
       // ignore
@@ -216,6 +222,7 @@ export default function VideoUpload({
   const fetchIncidents = async (videoId: string) => {
     try {
       const res = await getVideoCorrelatedIncidents(videoId);
+      if (isStaleVideo(videoId)) return;
       setIncidentList(res.correlated_incidents || []);
     } catch {
       // ignore
@@ -245,6 +252,7 @@ export default function VideoUpload({
         getSecurityEvents(videoId).catch(() => ({ events: [] })),
         getVideoZones(videoId).catch(() => ({ zones: [] })),
       ]);
+      if (isStaleVideo(videoId)) return;
       setTracks(tracksRes.tracks || []);
       setVehicleAttributes(attrsRes.attributes || []);
       setFaceDetections(facesRes.faces || []);
@@ -264,6 +272,7 @@ export default function VideoUpload({
   const fetchReports = async (videoId: string) => {
     try {
       const res = await getVideoReports(videoId);
+      if (isStaleVideo(videoId)) return;
       setReportsList(res.reports || []);
     } catch {
       // ignore
@@ -348,6 +357,7 @@ export default function VideoUpload({
     setIsFetchingSpecialized(true);
     try {
       const res = await getSpecializedObservations(videoId);
+      if (isStaleVideo(videoId)) return;
       setSpecializedList(res.observations || []);
     } catch {
       // ignore
@@ -363,6 +373,7 @@ export default function VideoUpload({
     setIsFetchingHealth(true);
     try {
       const res = await getVideoDetectorHealth(videoId);
+      if (isStaleVideo(videoId)) return;
       setDetectorHealth(res);
     } catch {
       // ignore
@@ -417,9 +428,13 @@ export default function VideoUpload({
         } else if (res.status === "needs_conversion") {
           setPlaybackState("preparing");
           setPlaybackMessage("Preparing browser-compatible playback…");
-          // Trigger conversion via GET /playback
-          fetch(getVideoPlaybackUrl(uploadResult.video_id)).catch(() => {});
+          // Trigger conversion via lightweight HEAD request (RFC 7233 — zero duplicate body download)
+          fetch(getVideoPlaybackUrl(uploadResult.video_id), { method: "HEAD" }).catch(() => {});
           pollTimer = setTimeout(checkPlayback, 1200);
+        } else if (res.status === "deferred") {
+          setPlaybackState("preparing");
+          setPlaybackMessage(res.message || "Playback conversion deferred (system under load) — retrying…");
+          pollTimer = setTimeout(checkPlayback, 2500);
         } else if (res.status === "ready") {
           setPlaybackState("ready");
           setPlaybackMessage(null);
@@ -454,13 +469,17 @@ export default function VideoUpload({
     if (uploadResult?.video_id) {
       setPlaybackState("preparing");
       setPlaybackMessage("Preparing browser-compatible playback…");
-      // Trigger transcode and re-check
-      fetch(getVideoPlaybackUrl(uploadResult.video_id)).catch(() => {});
-      setTimeout(async () => {
+      // Trigger transcode via lightweight HEAD request without downloading full file in background
+      fetch(getVideoPlaybackUrl(uploadResult.video_id), { method: "HEAD" }).catch(() => {});
+      let attempts = 0;
+      const maxAttempts = 30; // up to ~45 seconds
+      const pollUntilReady = async () => {
+        attempts++;
         try {
           const res = await getVideoPlaybackStatus(uploadResult.video_id);
           if (res.status === "ready") {
             setPlaybackState("ready");
+            setPlaybackMessage(null);
             if (videoRef.current) {
               videoRef.current.src = getVideoPlaybackUrl(uploadResult.video_id);
               videoRef.current.load();
@@ -468,21 +487,71 @@ export default function VideoUpload({
           } else if (res.status === "unavailable") {
             setPlaybackState("unavailable");
             setPlaybackMessage("Playback unavailable");
+          } else if (attempts < maxAttempts) {
+            setTimeout(pollUntilReady, 1500);
+          } else {
+            setPlaybackState("unavailable");
+            setPlaybackMessage("Playback unavailable");
           }
         } catch {
-          // ignore
+          if (attempts < maxAttempts) {
+            setTimeout(pollUntilReady, 1500);
+          }
         }
-      }, 1500);
+      };
+      setTimeout(pollUntilReady, 1500);
     }
+  };
+
+  // Explicit lifecycle reset of every piece of state that belongs to ONE specific video.
+  // Called whenever the workspace switches to a different video (or is cleared).
+  // UI preferences (active tab, filters, investigation mode) are intentionally preserved.
+  const resetVideoScopedState = () => {
+    setProcessingState("idle");
+    setProcessingResult(null);
+    setProcessingError(null);
+    setEvents([]);
+    setTimelineEvents([]);
+    setActiveEventId(null);
+    setInvestigationQuery("");
+    setIsInvestigating(false);
+    setInvestigationResponse(null);
+    setInvestigationError(null);
+    setAiResponse(null);
+    setAiHistory([]);
+    setEvidenceList([]);
+    setCapturingEventId(null);
+    setEvidenceFeedback(null);
+    setSelectedEvidence(null);
+    setIncidentList([]);
+    setTracks([]);
+    setVehicleAttributes([]);
+    setFaceDetections([]);
+    setSecurityEvents([]);
+    setSecurityZones([]);
+    setIntelligenceFeedback(null);
+    setReportsList([]);
+    setReportFeedback(null);
+    setSpecializedList([]);
+    setExpandedIncidentIds(new Set());
+    setDetectorHealth(null);
+    setExpandedEventIds({});
   };
 
   const handleLoadExistingVideo = async (videoIdToLoad?: string) => {
     const id = (videoIdToLoad || existingVideoIdInput).trim();
-    if (!id || isLoadingExisting) return;
+    if (!id) return;
+    // Only suppress duplicate loads of the SAME video; a switch to a different video must never be dropped.
+    if (isLoadingExisting && activeVideoIdRef.current === id) return;
+    if (activeVideoIdRef.current !== id) {
+      resetVideoScopedState();
+      activeVideoIdRef.current = id;
+    }
     setIsLoadingExisting(true);
     setErrorMessage(null);
     try {
       const meta = await getVideoMetadata(id);
+      if (isStaleVideo(id)) return;
       setUploadResult({
         video_id: meta.video_id,
         filename: meta.filename,
@@ -513,8 +582,10 @@ export default function VideoUpload({
       // Fetch timeline and events
       try {
         const timelineRes = await getVideoTimeline(id);
+        if (isStaleVideo(id)) return;
         setTimelineEvents(timelineRes.events || []);
         const eventsResponse = await getVideoEvents(id, { include_unvalidated: true });
+        if (isStaleVideo(id)) return;
         setEvents(eventsResponse.events || []);
         if (timelineRes.events && timelineRes.events.length > 0) {
           setProcessingState("completed");
@@ -529,9 +600,10 @@ export default function VideoUpload({
       fetchReports(id);
       fetchSpecialized(id);
     } catch (err: unknown) {
+      if (isStaleVideo(id)) return;
       setErrorMessage(err instanceof Error ? err.message : `Failed to load video '${id}'.`);
     } finally {
-      setIsLoadingExisting(false);
+      if (!isStaleVideo(id)) setIsLoadingExisting(false);
     }
   };
 
@@ -694,16 +766,18 @@ export default function VideoUpload({
   const handleInvestigate = async (queryToRun?: string) => {
     const q = queryToRun !== undefined ? queryToRun : investigationQuery;
     if (!q.trim() || !uploadResult?.video_id || isInvestigating) return;
+    const requestedVideoId = uploadResult.video_id;
     setInvestigationQuery(q);
     setIsInvestigating(true);
     setInvestigationError(null);
 
     if (investigationMode === "ai") {
       try {
-        const res = await aiInvestigateVideo(uploadResult.video_id, {
+        const res = await aiInvestigateVideo(requestedVideoId, {
           query: q.trim(),
           history: aiHistory,
         });
+        if (isStaleVideo(requestedVideoId)) return;
         setAiResponse(res);
         setAiHistory((prev) => [
           ...prev.slice(-4),
@@ -711,22 +785,25 @@ export default function VideoUpload({
           { role: "assistant", content: res.answer },
         ]);
       } catch (err: unknown) {
+        if (isStaleVideo(requestedVideoId)) return;
         setInvestigationError(
           err instanceof Error ? err.message : "AI Investigation service unavailable. Please try again."
         );
       } finally {
-        setIsInvestigating(false);
+        if (!isStaleVideo(requestedVideoId)) setIsInvestigating(false);
       }
     } else {
       try {
-        const res = await investigateVideo(uploadResult.video_id, q.trim());
+        const res = await investigateVideo(requestedVideoId, q.trim());
+        if (isStaleVideo(requestedVideoId)) return;
         setInvestigationResponse(res);
       } catch (err: unknown) {
+        if (isStaleVideo(requestedVideoId)) return;
         setInvestigationError(
           err instanceof Error ? err.message : "Investigation service unavailable. Please try again."
         );
       } finally {
-        setIsInvestigating(false);
+        if (!isStaleVideo(requestedVideoId)) setIsInvestigating(false);
       }
     }
   };
@@ -802,11 +879,10 @@ export default function VideoUpload({
     setErrorMessage(null);
     setUploadResult(null);
     setUploadProgress(0);
-    setProcessingState("idle");
-    setProcessingResult(null);
-    setProcessingError(null);
-    setEvents([]);
-    setTimelineEvents([]);
+    // A newly selected local file is not yet any stored video: clear all previous video-scoped state.
+    resetVideoScopedState();
+    activeVideoIdRef.current = null;
+    setIsLoadingExisting(false);
 
     const validationError = validateFile(file);
     if (validationError) {
@@ -858,6 +934,10 @@ export default function VideoUpload({
     setErrorMessage(null);
     try {
       const response = await uploadVideo(selectedFile, setUploadProgress);
+      if (activeVideoIdRef.current !== response.video_id) {
+        resetVideoScopedState();
+        activeVideoIdRef.current = response.video_id;
+      }
       setUploadResult(response);
       onVideoLoaded?.(response.video_id, response.filename);
       fetchEvidence(response.video_id);
@@ -880,6 +960,7 @@ export default function VideoUpload({
   // ---- Phase 4: Analyze Video + Fetch Timeline ----
   const handleAnalyze = async (force: boolean = false) => {
     if (!uploadResult?.video_id || processingState === "processing") return;
+    const requestedVideoId = uploadResult.video_id;
     setProcessingState("processing");
     setProcessingError(null);
     setEvents([]);
@@ -887,31 +968,35 @@ export default function VideoUpload({
     setProcessingResult(null);
 
     try {
-      const result = await processVideo(uploadResult.video_id, force);
+      const result = await processVideo(requestedVideoId, force);
+      if (isStaleVideo(requestedVideoId)) return;
       setProcessingResult(result);
 
       // Fetch grouped timeline events and raw events
-      const timelineRes = await getVideoTimeline(uploadResult.video_id);
+      const timelineRes = await getVideoTimeline(requestedVideoId);
+      if (isStaleVideo(requestedVideoId)) return;
       setTimelineEvents(timelineRes.events);
 
-      const eventsResponse = await getVideoEvents(uploadResult.video_id, { include_unvalidated: true });
+      const eventsResponse = await getVideoEvents(requestedVideoId, { include_unvalidated: true });
+      if (isStaleVideo(requestedVideoId)) return;
       setEvents(eventsResponse.events);
 
       // Fetch existing incidents and evidence
-      fetchIncidents(uploadResult.video_id);
-      fetchEvidence(uploadResult.video_id);
+      fetchIncidents(requestedVideoId);
+      fetchEvidence(requestedVideoId);
 
       // Fetch Phase 8 security intelligence
-      fetchSecurityIntelligence(uploadResult.video_id);
+      fetchSecurityIntelligence(requestedVideoId);
 
       // Fetch Phase 9 reports
-      fetchReports(uploadResult.video_id);
+      fetchReports(requestedVideoId);
 
       // Fetch Phase 15 specialized visual observations
-      fetchSpecialized(uploadResult.video_id);
+      fetchSpecialized(requestedVideoId);
 
       setProcessingState("completed");
     } catch (err: unknown) {
+      if (isStaleVideo(requestedVideoId)) return;
       const msg = err instanceof Error ? err.message : "Processing failed.";
       setProcessingError(msg);
       setProcessingState("failed");
@@ -937,22 +1022,12 @@ export default function VideoUpload({
     setErrorMessage(null);
     setUploadProgress(0);
     setCopiedId(false);
-    setProcessingState("idle");
-    setProcessingResult(null);
-    setProcessingError(null);
-    setEvents([]);
-    setTimelineEvents([]);
     setClassFilter("all");
     setMinConfidence(0);
-    setActiveEventId(null);
-    setInvestigationQuery("");
-    setIsInvestigating(false);
-    setInvestigationResponse(null);
-    setInvestigationError(null);
-    setEvidenceList([]);
-    setCapturingEventId(null);
-    setEvidenceFeedback(null);
-    setSelectedEvidence(null);
+    // Clears processing, timeline, investigation/AI history, evidence, incidents, tracks, reports, etc.
+    resetVideoScopedState();
+    activeVideoIdRef.current = null;
+    setIsLoadingExisting(false);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -3555,6 +3630,7 @@ export default function VideoUpload({
                 {activeView === "forensic" && uploadResult?.video_id && (
                   <div className="animate-in fade-in duration-200">
                     <ForensicSearchPanel
+                      key={uploadResult.video_id}
                       videoId={uploadResult.video_id}
                       videoDuration={processingResult?.duration_seconds}
                       onSeek={handleSeekToTimestamp}

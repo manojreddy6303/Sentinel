@@ -560,7 +560,7 @@ def playback_video(video_id: str, request: Request):
         )
 
     range_header = request.headers.get("range")
-    return stream_video_file_with_ranges(playback_path, range_header)
+    return stream_video_file_with_ranges(playback_path, range_header, is_head=(request.method == "HEAD"))
 
 
 @router.api_route("/{video_id}/stream", methods=["GET", "HEAD"])
@@ -570,7 +570,7 @@ def stream_video(video_id: str, request: Request):
     """
     target_file = _resolve_original_video(video_id)
     range_header = request.headers.get("range")
-    return stream_video_file_with_ranges(target_file, range_header)
+    return stream_video_file_with_ranges(target_file, range_header, is_head=(request.method == "HEAD"))
 
 
 def _correlate_security_evidence(video_id: str, security_events: List[Any]) -> None:
@@ -1099,6 +1099,16 @@ def process_video(
             "raw_detections_count": len(events),
             "grouped_events_count": len(grouped_events),
         }
+    except HTTPException as http_exc:
+        _mark_video_failed(video_id, str(http_exc.detail))
+        raise
+    except Exception as exc:
+        logger.error(f"Error processing video {video_id}: {exc}", exc_info=True)
+        _mark_video_failed(video_id, str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing video: {str(exc)}",
+        )
     finally:
         try:
             v_lock.release()

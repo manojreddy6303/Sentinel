@@ -116,6 +116,8 @@ class InvestigationService:
                 return self._query_specialized_observations(db, video_id, query_text, filters)
             elif result_type == "correlated_incidents":
                 return self._query_correlated_incidents(db, video_id, query_text, filters)
+            elif result_type == "evidence":
+                return self._query_evidence(db, video_id, query_text, filters)
             else:
                 return self._query_detections(db, video_id, query_text, filters)
         except Exception as exc:
@@ -355,33 +357,47 @@ class InvestigationService:
             q = q.filter(TrackModel.color.ilike(target_color))
 
         rows = q.order_by(TrackModel.first_seen.asc()).all()
+        # Query security events for this video once outside the track loop
+        all_video_sec_events = (
+            db.query(SecurityEventModel)
+            .filter(SecurityEventModel.video_id == video_id)
+            .order_by(SecurityEventModel.timestamp_seconds.asc())
+            .all()
+        )
+
         results = []
         for r in rows:
-            # Query security events associated with this track in this video (direct or fused multi-track)
-            all_video_sec_events = (
-                db.query(SecurityEventModel)
-                .filter(SecurityEventModel.video_id == video_id)
-                .order_by(SecurityEventModel.timestamp_seconds.asc())
-                .all()
-            )
-            sec_events = []
+            primary_sec_events = []
+            bystander_sec_events = []
             for se in all_video_sec_events:
-                tids = []
+                primary_tids = set()
                 if se.track_id:
-                    tids.append(se.track_id)
+                    primary_tids.add(se.track_id)
                 meta = se.incident_metadata or {}
-                if isinstance(meta, dict) and "track_ids" in meta and isinstance(meta["track_ids"], list):
-                    tids.extend(meta["track_ids"])
+                if isinstance(meta, dict) and "primary_tracks" in meta and isinstance(meta["primary_tracks"], list):
+                    primary_tids.update(meta["primary_tracks"])
                 s_ctx = meta.get("spatial_context") if isinstance(meta, dict) else None
                 if isinstance(s_ctx, dict) and "metadata" in s_ctx:
                     p_tid = s_ctx["metadata"].get("person_track_id")
                     if p_tid:
-                        tids.append(p_tid)
+                        primary_tids.add(p_tid)
                 bbox = se.bounding_box or {}
                 if isinstance(bbox, dict) and bbox.get("person_track_id"):
-                    tids.append(bbox.get("person_track_id"))
-                if r.track_id in tids:
-                    sec_events.append(se)
+                    primary_tids.add(bbox.get("person_track_id"))
+
+                secondary_tids = set()
+                if isinstance(meta, dict):
+                    if "secondary_tracks" in meta and isinstance(meta["secondary_tracks"], list):
+                        secondary_tids.update(meta["secondary_tracks"])
+                    if "track_ids" in meta and isinstance(meta["track_ids"], list):
+                        for tid in meta["track_ids"]:
+                            if tid not in primary_tids:
+                                secondary_tids.add(tid)
+
+                if r.track_id in primary_tids:
+                    primary_sec_events.append(se)
+                elif r.track_id in secondary_tids:
+                    bystander_sec_events.append(se)
 
             sec_event_list = [
                 {
@@ -389,15 +405,25 @@ class InvestigationService:
                     "timestamp": round(se.timestamp_seconds, 2),
                     "severity": se.severity,
                     "description": se.description,
+                    "role": "primary",
                 }
-                for se in sec_events
+                for se in primary_sec_events
+            ] + [
+                {
+                    "event_type": se.event_type,
+                    "timestamp": round(se.timestamp_seconds, 2),
+                    "severity": se.severity,
+                    "description": se.description,
+                    "role": "bystander",
+                }
+                for se in bystander_sec_events
             ]
 
             # Factual observational movement and activity summary (zero biometric attribution)
             dur_str = f"{round(r.duration_seconds, 1)}s"
-            theft_ev = next((se for se in sec_events if se.event_type == "POTENTIAL_THEFT"), None)
-            fall_ev = next((se for se in sec_events if se.event_type == "POTENTIAL_PERSON_FALL"), None)
-            loit_ev = next((se for se in sec_events if se.event_type == "PROLONGED_PRESENCE"), None)
+            theft_ev = next((se for se in primary_sec_events if se.event_type in ("POTENTIAL_THEFT", "POTENTIAL_OBJECT_TAKEAWAY")), None)
+            fall_ev = next((se for se in primary_sec_events if se.event_type in ("POTENTIAL_PERSON_FALL", "POTENTIAL_PERSON_DOWN")), None)
+            loit_ev = next((se for se in primary_sec_events if se.event_type == "PROLONGED_PRESENCE"), None)
             color_desc = f"with {r.color} clothing " if r.color else ""
 
             if theft_ev:
@@ -428,8 +454,16 @@ class InvestigationService:
                     f"The individual {color_desc}({r.track_id}) remained stationary in a localized area for {r.duration_seconds:.1f}s. "
                     f"Prolonged presence pattern observed."
                 )
-            elif sec_event_list:
-                ev_names = ", ".join(sorted(set(se["event_type"] for se in sec_event_list)))
+            elif bystander_sec_events:
+                ev_names = ", ".join(sorted(set(se.event_type for se in bystander_sec_events)))
+                act_summary = (
+                    f"The person {color_desc}({r.track_id}) was observed moving through the scene from {round(r.first_seen, 1)}s to {round(r.last_seen, 1)}s "
+                    f"across {r.detection_count} detections (duration: {dur_str}). "
+                    f"No security infractions or suspicious activity patterns were recorded for this track "
+                    f"(present as a bystander during nearby scene activity: {ev_names})."
+                )
+            elif primary_sec_events:
+                ev_names = ", ".join(sorted(set(se["event_type"] for se in sec_event_list if se["role"] == "primary")))
                 act_summary = (
                     f"Continuous visual presence observed from {round(r.first_seen, 1)}s to {round(r.last_seen, 1)}s "
                     f"across {r.detection_count} detections (duration: {dur_str}). Associated security event(s): {ev_names}."
@@ -531,6 +565,51 @@ class InvestigationService:
             "query": query_text,
             "is_supported": True,
             "result_type": "faces",
+            "interpreted_filters": filters,
+            "count": len(results),
+            "message": msg,
+            "results": results,
+        }
+
+    def _query_evidence(
+        self, db, video_id: str, query_text: str, filters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Fetch matching preserved forensic evidence records from DB."""
+        q = db.query(EvidenceModel).filter(
+            EvidenceModel.video_id == video_id,
+            EvidenceModel.validation_status == "VALID",
+        )
+        if filters.get("start_time") is not None:
+            q = q.filter(EvidenceModel.timestamp_seconds >= filters["start_time"])
+        if filters.get("end_time") is not None:
+            q = q.filter(EvidenceModel.timestamp_seconds <= filters["end_time"])
+
+        rows = q.order_by(EvidenceModel.timestamp_seconds.asc()).all()
+        results = [
+            {
+                "evidence_id": r.id,
+                "video_id": r.video_id,
+                "event_id": r.event_id,
+                "timestamp": round(r.timestamp_seconds, 2),
+                "evidence_type": r.evidence_type,
+                "object_class": r.object_class,
+                "confidence": round(r.confidence, 4) if r.confidence else None,
+                "has_snapshot": bool(r.snapshot_path),
+                "has_annotated": bool(r.annotated_snapshot_path),
+                "has_clip": bool(r.clip_path),
+                "description": f"{r.evidence_type} evidence preserved around {r.timestamp_seconds:.1f}s for {r.object_class or 'incident'}.",
+            }
+            for r in rows
+        ]
+        msg = (
+            f"Found {len(results)} verified forensic evidence records registered in Sentinel vault."
+            if results
+            else "No preserved forensic evidence items were found matching this inquiry."
+        )
+        return {
+            "query": query_text,
+            "is_supported": True,
+            "result_type": "evidence",
             "interpreted_filters": filters,
             "count": len(results),
             "message": msg,

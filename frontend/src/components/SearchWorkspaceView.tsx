@@ -170,6 +170,7 @@ export default function SearchWorkspaceView({
           </div>
 
           <ForensicSearchPanel
+            key={selectedVideoId}
             videoId={selectedVideoId}
             videoDuration={selectedVideoDuration}
             onSeek={onSeek}

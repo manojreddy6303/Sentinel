@@ -108,14 +108,21 @@ class StructuredIntentValidator:
                 }
 
         # 2. Facial Recognition / Identity Guardrail
-        for pat in IDENTITY_PATTERNS:
-            if re.search(pat, t):
-                return {
-                    "is_supported": False,
-                    "guardrail_triggered": "identity",
-                    "message": "Sentinel does not perform facial recognition or identity identification.",
-                    "intent": "guardrail_rejected",
-                }
+        # Exempt anonymous surveillance questions like "who was involved", "who took", "who interacted", "who was present"
+        is_tracking_inquiry = bool(
+            re.search(r"\bwho\s+(?:was|is)\s+(?:involved|present|there|detected|seen|interacting|moving|active)\b", t)
+            or re.search(r"\bwho\s+(?:took|interacted|moved|touched)\b", t)
+            or re.search(r"\b(who\s+was\s+in|who\s+all\s+were)\b", t)
+        )
+        if not is_tracking_inquiry:
+            for pat in IDENTITY_PATTERNS:
+                if re.search(pat, t):
+                    return {
+                        "is_supported": False,
+                        "guardrail_triggered": "identity",
+                        "message": "Sentinel does not perform facial recognition or identity identification.",
+                        "intent": "guardrail_rejected",
+                    }
 
         return None
 
@@ -152,10 +159,27 @@ class StructuredIntentValidator:
             "end_time": None,
             "min_confidence": None,
             "event_type": raw_intent.get("event_type"),
+            "color": raw_intent.get("color"),
+            "track_id": raw_intent.get("track_id"),
             "result_type": raw_intent.get("result_type", "detections"),
             "is_summary_request": bool(raw_intent.get("is_summary_request", False)),
             "is_activity_request": bool(raw_intent.get("is_activity_request", False)),
         }
+
+        # Check raw query for clothing color / track inquiry (e.g. "blue colour lady", "lady in blue")
+        if raw_query_text:
+            q_lower = raw_query_text.lower()
+            if not sanitized["color"]:
+                for c in ["blue", "red", "black", "white", "green", "yellow", "orange", "silver", "gray", "grey"]:
+                    if re.search(rf"\b{c}\b", q_lower):
+                        sanitized["color"] = c
+                        break
+            if any(term in q_lower for term in ["lady", "ladies", "dress", "skirt", "attire", "wearing", "clothing", "coat", "hoodie", "jacket"]):
+                if not sanitized["object_class"]:
+                    sanitized["object_class"] = "person"
+            if sanitized["color"] or sanitized["track_id"] or (sanitized["object_class"] == "person" and any(term in q_lower for term in ["lady", "dress", "wearing", "color", "colour"])):
+                if not sanitized["event_type"]:
+                    sanitized["result_type"] = "tracks"
 
         # Validate object classes
         raw_classes = raw_intent.get("object_classes")
@@ -232,7 +256,14 @@ class StructuredIntentValidator:
                 raise ValidationError(f"Invalid min_confidence: {min_conf}")
 
         # Validate result_type
-        if sanitized["result_type"] not in ["detections", "events", "count", "security_events"]:
-            sanitized["result_type"] = "detections" if sanitized["object_class"] else "events"
+        valid_result_types = [
+            "detections", "events", "count", "security_events", "tracks",
+            "vehicle_attributes", "faces", "specialized", "correlated_incidents", "evidence",
+        ]
+        if sanitized["result_type"] not in valid_result_types:
+            if sanitized.get("color") or sanitized.get("track_id"):
+                sanitized["result_type"] = "tracks"
+            else:
+                sanitized["result_type"] = "detections" if sanitized["object_class"] else "events"
 
         return sanitized

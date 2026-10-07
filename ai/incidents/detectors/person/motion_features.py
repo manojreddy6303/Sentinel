@@ -27,24 +27,35 @@ class PersonMotionFeatureEngine:
         cls,
         track: TrackedObject,
         context_motions: Optional[Dict[str, Any]] = None,
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Extract holistic posture and movement dynamics across a person track.
+        Includes 4-border frame clipping detection and multi-signal temporal persistence.
         """
         if not track or not track.history_bboxes:
             return {
                 "track_id": getattr(track, "track_id", "unknown"),
                 "duration_seconds": 0.0,
                 "observation_count": 0,
-                "aspect_ratio_transition": False,
-                "max_downward_velocity": 0.0,
+                "has_aspect_ratio_transition": False,
+                "has_posture_persistence": False,
+                "max_downward_velocity_px_s": 0.0,
+                "max_downward_velocity_bl_s": 0.0,
                 "max_normalized_speed": 0.0,
                 "avg_normalized_speed": 0.0,
                 "is_low_mobility": False,
+                "is_edge_clipped": False,
+                "is_transition_edge_clipped": False,
+                "is_track_terminating_at_boundary": False,
             }
 
         sorted_history = sorted(track.history_bboxes, key=lambda b: float(b["timestamp"]))
         observations: List[Dict[str, Any]] = []
+
+        margin_x = max(18.0, (frame_width * 0.035) if frame_width else 20.0)
+        margin_y = max(18.0, (frame_height * 0.035) if frame_height else 20.0)
 
         for item in sorted_history:
             t = float(item["timestamp"])
@@ -59,6 +70,21 @@ class PersonMotionFeatureEngine:
             cx = (x1 + x2) / 2.0
             cy = (y1 + y2) / 2.0
 
+            # 4-edge boundary clipping detection
+            clipped_edges = []
+            if x1 <= margin_x:
+                clipped_edges.append("left")
+            if y1 <= margin_y:
+                clipped_edges.append("top")
+            if frame_width and x2 >= (frame_width - margin_x):
+                clipped_edges.append("right")
+            if frame_height and y2 >= (frame_height - margin_y):
+                clipped_edges.append("bottom")
+            if w < 15.0 or h < 15.0:
+                clipped_edges.append("collapsed")
+
+            is_clipped = len(clipped_edges) > 0
+
             observations.append({
                 "timestamp": t,
                 "x1": x1,
@@ -71,39 +97,76 @@ class PersonMotionFeatureEngine:
                 "cx": cx,
                 "cy": cy,
                 "ground_y": y2,
+                "is_border_clipped": is_clipped,
+                "clipped_edges": clipped_edges,
             })
 
         if not observations:
             return {"track_id": track.track_id, "duration_seconds": 0.0, "observation_count": 0}
 
-        # 1. Aspect Ratio Dynamics
+        # 1. Aspect Ratio Dynamics & Temporal Sequence Verification
+        # True fall requires:
+        # UPRIGHT (ar < 0.65) -> genuine rapid descent -> horizontal (ar >= 0.85) -> persistent low posture
         aspect_ratios = [o["aspect_ratio"] for o in observations]
         initial_ar = aspect_ratios[0]
         final_ar = aspect_ratios[-1]
         min_ar = min(aspect_ratios)
         max_ar = max(aspect_ratios)
 
-        # Transition check: was person initially upright (ar < 0.60) and collapsed to horizontal (ar >= 0.85)?
-        # And did the top of the body (head y1) descend significantly?
         has_aspect_ratio_transition = False
+        has_posture_persistence = False
+        is_transition_edge_clipped = False
         transition_timestamp = None
         transition_duration = 0.0
 
         for i in range(len(observations)):
-            if observations[i]["aspect_ratio"] < 0.60:
+            if observations[i]["aspect_ratio"] < 0.65:
                 # Look forward up to 2.5 seconds
                 for j in range(i + 1, len(observations)):
                     dt = observations[j]["timestamp"] - observations[i]["timestamp"]
                     if dt > 2.5:
                         break
                     if observations[j]["aspect_ratio"] >= 0.85:
-                        # Verify head descent (y1 increases in image coordinates)
+                        # Check 1: Was transition observation clipped by an image boundary?
+                        if observations[j]["is_border_clipped"]:
+                            is_transition_edge_clipped = True
+                            continue
+
+                        # Check 2: Verify head descent (y1 increases downward in image coordinates)
                         head_descent = observations[j]["y1"] - observations[i]["y1"]
-                        if head_descent >= (observations[i]["height"] * 0.40):
+                        if head_descent < (observations[i]["height"] * 0.35):
+                            continue
+
+                        # Check 3: Temporal Persistence (must not be a 1-frame anomaly or terminal disappearing frame)
+                        # Does horizontal/low posture persist for at least 1 follow-up observation or dwell time?
+                        if j >= len(observations) - 1:
+                            # Track ends immediately at transition with ZERO post-event evidence!
+                            continue
+
+                        subsequent = observations[j + 1:]
+                        if not subsequent:
+                            continue
+
+                        # Check if subsequent observation sustains low posture or if person immediately bounces upright
+                        next_ar = subsequent[0]["aspect_ratio"]
+                        # Crouch/bend quick recovery check: returns to upright within 1.5s
+                        quick_recovery = any(
+                            s["aspect_ratio"] < 0.60
+                            for s in subsequent
+                            if (s["timestamp"] - observations[j]["timestamp"]) <= 1.5
+                        )
+                        if quick_recovery and next_ar < 0.70:
+                            continue
+
+                        # Persistence confirmed if next observation is >= 0.70 or average remaining >= 0.70
+                        avg_subsequent_ar = sum(s["aspect_ratio"] for s in subsequent) / len(subsequent)
+                        if next_ar >= 0.70 or avg_subsequent_ar >= 0.70:
                             has_aspect_ratio_transition = True
+                            has_posture_persistence = True
                             transition_timestamp = observations[j]["timestamp"]
                             transition_duration = dt
                             break
+
             if has_aspect_ratio_transition:
                 break
 
@@ -120,7 +183,6 @@ class PersonMotionFeatureEngine:
                     continue
                 if dt > 2.5:
                     break
-                # Downward displacement in image space increases Y coordinate
                 d_cy = observations[j]["cy"] - o_curr["cy"]
                 if d_cy > 0:
                     v_down = d_cy / dt
@@ -161,12 +223,15 @@ class PersonMotionFeatureEngine:
                     is_low_mobility = True
                     horizontal_dwell_seconds = final_segment[-1]["timestamp"] - final_segment[0]["timestamp"]
 
-        # 5. Image Boundary Clipping / Truncation Check
-        # Detect if person bounding box is clipped by camera frame edges (common false positive for fall)
-        is_edge_clipped = any(
-            o["x1"] < 25.0 or o["y1"] < 25.0 or o["width"] < 15.0 or o["height"] < 15.0
-            for o in observations
-        )
+        # 5. Image Boundary Clipping / Exit Suppression
+        # Detect if person bounding box is clipped by camera frame edges
+        is_edge_clipped = any(o["is_border_clipped"] for o in observations)
+        # Check if track terminates at or near an image boundary (exit rather than fall)
+        is_track_terminating_at_boundary = False
+        if observations:
+            last_obs = observations[-1]
+            if last_obs["is_border_clipped"]:
+                is_track_terminating_at_boundary = True
 
         return {
             "track_id": track.track_id,
@@ -178,6 +243,7 @@ class PersonMotionFeatureEngine:
             "min_aspect_ratio": round(min_ar, 3),
             "max_aspect_ratio": round(max_ar, 3),
             "has_aspect_ratio_transition": has_aspect_ratio_transition,
+            "has_posture_persistence": has_posture_persistence,
             "transition_timestamp": transition_timestamp,
             "transition_duration": round(transition_duration, 2),
             "max_downward_displacement_px": round(max_downward_disp, 1),
@@ -189,6 +255,8 @@ class PersonMotionFeatureEngine:
             "is_low_mobility": is_low_mobility,
             "horizontal_dwell_seconds": round(horizontal_dwell_seconds, 2),
             "is_edge_clipped": is_edge_clipped,
+            "is_transition_edge_clipped": is_transition_edge_clipped,
+            "is_track_terminating_at_boundary": is_track_terminating_at_boundary,
             "observations": observations,
         }
 

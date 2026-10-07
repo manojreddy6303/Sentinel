@@ -399,44 +399,141 @@ class NegativeEvidenceEngine:
         track: Any,
         context: Any,
         event_time: float,
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
     ) -> List[SupportingSignal]:
         """Identify counter-evidence refuting a person fall."""
         contradictory_signals: List[SupportingSignal] = []
         motions = context.track_motions.get(track.track_id, []) if context else []
         post_motions = [m for m in motions if m.timestamp > event_time]
 
-        # 1. Resumed walking check
-        if len(post_motions) >= 3 and any(m.velocity_estimate > 25.0 for m in post_motions):
+        # Resolve frame dimensions
+        fw = frame_width
+        fh = frame_height
+        if context:
+            if fw is None and hasattr(context, "frame_width") and context.frame_width:
+                fw = context.frame_width
+            elif fw is None and hasattr(context, "video_metadata") and context.video_metadata:
+                fw = float(context.video_metadata.get("width") or 0.0) or None
+            if fh is None and hasattr(context, "frame_height") and context.frame_height:
+                fh = context.frame_height
+            elif fh is None and hasattr(context, "video_metadata") and context.video_metadata:
+                fh = float(context.video_metadata.get("height") or 0.0) or None
+
+        margin_x = max(18.0, (fw * 0.035) if fw else 20.0)
+        margin_y = max(18.0, (fh * 0.035) if fh else 20.0)
+
+        # 1. Resumed upright walking check:
+        # Must verify that person returned to UPRIGHT posture (ar < 0.65) while moving at transit speed.
+        # Moving while collapsing or shifting horizontally on the ground is NOT upright walking!
+        upright_walking = False
+        if track.history_bboxes:
+            for b_entry in track.history_bboxes:
+                bt = float(b_entry.get("timestamp", 0.0))
+                if bt > event_time + 0.8:
+                    bb = b_entry.get("bbox", {})
+                    w = max(1.0, float(bb.get("x2", 1)) - float(bb.get("x1", 0)))
+                    h = max(1.0, float(bb.get("y2", 1)) - float(bb.get("y1", 0)))
+                    ar = w / h
+                    if ar < 0.65:
+                        matching_m = [m for m in post_motions if abs(m.timestamp - bt) <= 0.6]
+                        if any(m.velocity_estimate > 25.0 for m in matching_m):
+                            upright_walking = True
+                            break
+
+        if upright_walking:
             contradictory_signals.append(
                 SupportingSignal(
                     signal_type="Negative: Resumed Upright Walking",
-                    description=f"Person [{track.track_id}] resumed upright walking transit at {post_motions[-1].velocity_estimate:.1f}px/s after descent.",
+                    description=f"Person [{track.track_id}] resumed upright walking transit after descent.",
                     confidence=0.88,
                     timestamp=event_time,
                 )
             )
 
-        # 2. Camera Frame Boundary Clipping Check
-        # Detect if bounding box touched frame borders (causing artificial width/height inversion)
+        # 2. Camera Frame Boundary Clipping Check across all 4 borders
         if track.history_bboxes:
             for b_entry in track.history_bboxes:
+                t = float(b_entry.get("timestamp", 0.0))
+                if abs(t - event_time) > 2.5 and t < event_time:
+                    continue
                 b = b_entry.get("bbox", {})
                 x1 = float(b.get("x1", 100))
                 y1 = float(b.get("y1", 100))
-                if x1 < 25.0 or y1 < 25.0:
+                x2 = float(b.get("x2", 100))
+                y2 = float(b.get("y2", 100))
+                clipped_edges = []
+                if x1 <= margin_x:
+                    clipped_edges.append("left")
+                if y1 <= margin_y:
+                    clipped_edges.append("top")
+                if fw and x2 >= (fw - margin_x):
+                    clipped_edges.append("right")
+                if fh and y2 >= (fh - margin_y):
+                    clipped_edges.append("bottom")
+
+                if clipped_edges:
                     contradictory_signals.append(
                         SupportingSignal(
                             signal_type="Negative: Frame Boundary Truncation",
-                            description="Bounding box geometry was clipped by the camera frame border, causing artificial aspect-ratio distortion.",
-                            confidence=0.92,
-                            timestamp=event_time,
+                            description=(
+                                f"Bounding box geometry was clipped by camera frame border ({', '.join(clipped_edges)}), "
+                                f"causing artificial aspect-ratio distortion."
+                            ),
+                            confidence=0.95,
+                            timestamp=t,
                         )
                     )
                     break
 
-        # 3. Posture recovery check
-        if track.history_bboxes and len(track.history_bboxes) >= 4:
-            later_boxes = [b for b in track.history_bboxes if float(b.get("timestamp", 0)) > event_time + 1.0]
+        # 3. Track Termination At Boundary Exit Check
+        if track.history_bboxes:
+            last_entry = max(track.history_bboxes, key=lambda b: float(b.get("timestamp", 0.0)))
+            last_t = float(last_entry.get("timestamp", 0.0))
+            if (last_t - event_time) <= 1.5:
+                lb = last_entry.get("bbox", {})
+                lx1 = float(lb.get("x1", 100))
+                ly1 = float(lb.get("y1", 100))
+                lx2 = float(lb.get("x2", 100))
+                ly2 = float(lb.get("y2", 100))
+                exit_edges = []
+                if lx1 <= margin_x:
+                    exit_edges.append("left")
+                if ly1 <= margin_y:
+                    exit_edges.append("top")
+                if fw and lx2 >= (fw - margin_x):
+                    exit_edges.append("right")
+                if fh and ly2 >= (fh - margin_y):
+                    exit_edges.append("bottom")
+                if exit_edges:
+                    contradictory_signals.append(
+                        SupportingSignal(
+                            signal_type="Negative: Track Termination At Frame Exit",
+                            description=(
+                                f"Track [{track.track_id}] terminated immediately at camera frame boundary ({', '.join(exit_edges)}), "
+                                f"indicating subject exited field of view rather than sustaining a fall."
+                            ),
+                            confidence=0.95,
+                            timestamp=last_t,
+                        )
+                    )
+
+        # 4. Insufficient Post-Descent Persistence Check
+        if track.history_bboxes:
+            post_boxes = [b for b in track.history_bboxes if float(b.get("timestamp", 0.0)) > event_time + 0.2]
+            if len(post_boxes) < 1:
+                contradictory_signals.append(
+                    SupportingSignal(
+                        signal_type="Negative: Insufficient Post-Descent Persistence",
+                        description=f"Track [{track.track_id}] ended abruptly without corroborating post-descent posture persistence.",
+                        confidence=0.88,
+                        timestamp=event_time,
+                    )
+                )
+
+        # 5. Posture recovery check (quick crouch/bend recovery)
+        if track.history_bboxes and len(track.history_bboxes) >= 3:
+            later_boxes = [b for b in track.history_bboxes if float(b.get("timestamp", 0)) > event_time + 0.4]
             if later_boxes:
                 upright_count = 0
                 for lb in later_boxes:
@@ -445,12 +542,12 @@ class NegativeEvidenceEngine:
                     h = max(1.0, float(bb.get("y2", 1)) - float(bb.get("y1", 0)))
                     if (w / h) < 0.65:
                         upright_count += 1
-                if upright_count >= 2:
+                if upright_count >= 1:
                     contradictory_signals.append(
                         SupportingSignal(
                             signal_type="Negative: Upright Posture Maintained",
-                            description="Person posture returned to upright geometry shortly after event window.",
-                            confidence=0.85,
+                            description="Person posture returned to upright geometry shortly after event window (temporary crouch/bend).",
+                            confidence=0.88,
                             timestamp=event_time,
                         )
                     )
@@ -463,11 +560,29 @@ class NegativeEvidenceEngine:
         track: Any,
         context: Any,
         event_time: float,
+        frame_width: Optional[float] = None,
+        frame_height: Optional[float] = None,
     ) -> List[SupportingSignal]:
         """Identify counter-evidence refuting a person down state."""
         contradictory_signals: List[SupportingSignal] = []
         motions = context.track_motions.get(track.track_id, []) if context else []
         post_motions = [m for m in motions if m.timestamp > event_time]
+
+        # Resolve frame dimensions
+        fw = frame_width
+        fh = frame_height
+        if context:
+            if fw is None and hasattr(context, "frame_width") and context.frame_width:
+                fw = context.frame_width
+            elif fw is None and hasattr(context, "video_metadata") and context.video_metadata:
+                fw = float(context.video_metadata.get("width") or 0.0) or None
+            if fh is None and hasattr(context, "frame_height") and context.frame_height:
+                fh = context.frame_height
+            elif fh is None and hasattr(context, "video_metadata") and context.video_metadata:
+                fh = float(context.video_metadata.get("height") or 0.0) or None
+
+        margin_x = max(18.0, (fw * 0.035) if fw else 20.0)
+        margin_y = max(18.0, (fh * 0.035) if fh else 20.0)
 
         if len(post_motions) >= 2 and any(m.velocity_estimate > 20.0 for m in post_motions):
             contradictory_signals.append(
@@ -484,12 +599,15 @@ class NegativeEvidenceEngine:
                 b = b_entry.get("bbox", {})
                 x1 = float(b.get("x1", 100))
                 y1 = float(b.get("y1", 100))
-                if x1 < 25.0 or y1 < 25.0:
+                x2 = float(b.get("x2", 100))
+                y2 = float(b.get("y2", 100))
+                clipped = (x1 <= margin_x or y1 <= margin_y or (fw and x2 >= fw - margin_x) or (fh and y2 >= fh - margin_y))
+                if clipped:
                     contradictory_signals.append(
                         SupportingSignal(
                             signal_type="Negative: Frame Boundary Truncation",
-                            description="Subject was occluded or clipped by camera edge, precluding reliable low-mobility classification.",
-                            confidence=0.90,
+                            description="Subject was occluded or clipped by camera frame edge, precluding reliable low-mobility classification.",
+                            confidence=0.92,
                             timestamp=event_time,
                         )
                     )

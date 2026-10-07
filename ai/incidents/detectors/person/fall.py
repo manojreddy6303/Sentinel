@@ -67,35 +67,57 @@ class PersonFallDetector(BaseIncidentDetector):
         candidates: List[IncidentCandidate] = []
         persons = [t for t in context.tracks if t.object_class == "person" and t.is_validated]
 
+        fw = None
+        fh = None
+        if hasattr(context, "frame_dimensions") and context.frame_dimensions:
+            fw, fh = context.frame_dimensions
+        elif hasattr(context, "video_metadata") and context.video_metadata:
+            fw = float(context.video_metadata.get("width") or 0.0) or None
+            fh = float(context.video_metadata.get("height") or 0.0) or None
+
         for track in persons:
             if track.duration_seconds < 0.8:
                 continue
 
-            dynamics = PersonMotionFeatureEngine.compute_person_dynamics(track, context.track_motions)
+            dynamics = PersonMotionFeatureEngine.compute_person_dynamics(
+                track, context.track_motions, frame_width=fw, frame_height=fh
+            )
             has_ar_trans = dynamics.get("has_aspect_ratio_transition", False)
+            has_persistence = dynamics.get("has_posture_persistence", False)
             down_vel = dynamics.get("max_downward_velocity_px_s", 0.0)
+            down_bl_s = dynamics.get("max_downward_velocity_bl_s", 0.0)
             event_t = dynamics.get("downward_event_time") or track.first_seen
 
-            # Negative evidence check
-            neg_signals = NegativeEvidenceEngine.evaluate_fall_negative_evidence(track, context, event_t)
+            # 1. Camera edge clipping & exit suppression:
+            if (
+                dynamics.get("is_edge_clipped", False)
+                or dynamics.get("is_transition_edge_clipped", False)
+                or dynamics.get("is_track_terminating_at_boundary", False)
+            ):
+                continue
+
+            # 2. Negative evidence check:
+            neg_signals = NegativeEvidenceEngine.evaluate_fall_negative_evidence(
+                track, context, event_t, frame_width=fw, frame_height=fh
+            )
             neg_names = {s.signal_type for s in neg_signals}
             if any(k in s for s in neg_names for k in [
                 "Resumed Upright Walking",
                 "Frame Boundary Truncation",
+                "Track Termination At Frame Exit",
+                "Insufficient Post-Descent Persistence",
                 "Upright Posture Maintained",
             ]):
                 continue
 
-            if dynamics.get("is_edge_clipped", False):
-                # Camera frame border truncation causes artificial aspect-ratio distortion
+            # 3. Temporal Posture Persistence:
+            if not has_persistence:
                 continue
 
-            # Check positive signals: must have normalized downward descent and aspect transition
-            down_bl_s = dynamics.get("max_downward_velocity_bl_s", 0.0)
-            has_downward_motion = down_bl_s >= 0.80 or down_vel >= self.min_downward_velocity_px_s
-            ar_jump = dynamics.get("max_aspect_ratio", 0.0) - dynamics.get("initial_aspect_ratio", 0.0)
+            # 4. Scale-Normalized Downward Velocity (must drop >= 0.65 body-lengths/s and >= 20.0 px/s):
+            has_downward_motion = down_bl_s >= 0.65 and down_vel >= 20.0
 
-            # Fall requires aspect ratio transition + significant downward velocity
+            # Fall candidate requires both verified aspect ratio transition and normalized descent
             is_fall_candidate = has_ar_trans and has_downward_motion
 
             if not is_fall_candidate:

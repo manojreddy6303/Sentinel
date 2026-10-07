@@ -487,6 +487,7 @@ export default function AppShell() {
               </div>
 
               <VideoUpload
+                key={inspectingVideoId || "new"}
                 initialVideoId={inspectingVideoId === "new" ? undefined : inspectingVideoId}
                 activeCaseId={activeCase?.id || null}
                 onVideoLoaded={(vid, fname) => {

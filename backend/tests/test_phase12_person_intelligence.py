@@ -613,3 +613,111 @@ class TestPhase12ForensicAuditRegressions:
         # Must be rejected because Parallel Side-by-Side Walking is in severe contradictions
         assert validated.validation_decision == ValidationDecision.REJECTED.value
         assert validated.confidence <= 0.25
+
+
+class TestGenericFallFalsePositiveSuppressionAndPositiveDetection:
+    """
+    Mandatory regression tests for generic multi-signal temporal fall detection:
+    A. Person walking out of bottom/side frame -> NO FALL
+    B. Temporary bbox becoming wide due to occlusion -> NO FALL
+    C. Single downward velocity spike -> NO FALL
+    D. Brief crouch/bend then upright -> NO FALL
+    E. Track termination with insufficient post-event evidence -> NO CONFIRMED FALL
+    F. Upright -> rapid descent -> persistent low/horizontal posture -> FALL CANDIDATE
+    """
+
+    def test_scenario_a_person_walking_out_of_bottom_or_side_frame_no_fall(self):
+        """A: Person approaching and exiting camera frame border (bottom/side) must not trigger fall."""
+        detector = PersonFallDetector()
+        # Frame dimensions: 768 x 432
+        # Person walks toward bottom border; final bbox is truncated at bottom edge (y2=430 on height 432)
+        boxes = [
+            [400.0, 100.0, 480.0, 300.0],  # upright in scene (h=200, w=80, ar=0.40)
+            [420.0, 150.0, 510.0, 360.0],  # walking forward (h=210, w=90, ar=0.43)
+            [450.0, 220.0, 560.0, 410.0],  # approaching bottom (h=190, w=110, ar=0.58)
+            [470.0, 260.0, 620.0, 430.0],  # clipped at bottom boundary (dist to 432 is 2px! w=150, h=170, ar=0.88)
+        ]
+        t = make_person_track("P-EXIT-BOTTOM", [0.0, 1.0, 2.0, 3.0], boxes)
+        ctx = make_person_context([t])
+        ctx.video_metadata = {"width": 768, "height": 432}
+        candidates = detector.analyze(ctx)
+        assert len(candidates) == 0, f"Expected 0 fall candidates for frame exit, got {len(candidates)}"
+
+    def test_scenario_b_temporary_bbox_wide_due_to_occlusion_no_fall(self):
+        """B: Temporary wide bounding box from occlusion/reassociation must not trigger fall."""
+        detector = PersonFallDetector()
+        # Person upright, 1 frame temporarily wide, then immediately normal upright
+        boxes = [
+            [200.0, 200.0, 260.0, 380.0],  # upright (w=60, h=180, ar=0.33)
+            [205.0, 205.0, 265.0, 385.0],  # upright (w=60, h=180, ar=0.33)
+            [190.0, 210.0, 380.0, 390.0],  # momentary occlusion merge (w=190, h=180, ar=1.05)
+            [215.0, 215.0, 275.0, 395.0],  # returned upright (w=60, h=180, ar=0.33)
+            [220.0, 220.0, 280.0, 400.0],  # returned upright (w=60, h=180, ar=0.33)
+        ]
+        t = make_person_track("P-OCCLUDED", [0.0, 1.0, 2.0, 3.0, 4.0], boxes)
+        ctx = make_person_context([t])
+        candidates = detector.analyze(ctx)
+        assert len(candidates) == 0, "Occlusion glitch must not trigger fall"
+
+    def test_scenario_c_single_downward_velocity_spike_no_fall(self):
+        """C: Rapid vertical movement without horizontal posture collapse must not trigger fall."""
+        detector = PersonFallDetector()
+        # Person rapidly steps down or jumps, maintaining upright geometry (ar ~ 0.35)
+        boxes = [
+            [200.0, 100.0, 250.0, 250.0],  # upright (h=150, w=50, ar=0.33)
+            [200.0, 180.0, 250.0, 330.0],  # rapid downward transit (80px in 1s, but upright! ar=0.33)
+            [200.0, 200.0, 250.0, 350.0],  # upright (h=150, w=50, ar=0.33)
+            [200.0, 205.0, 250.0, 355.0],  # upright (h=150, w=50, ar=0.33)
+        ]
+        t = make_person_track("P-STEP-DOWN", [0.0, 1.0, 2.0, 3.0], boxes)
+        ctx = make_person_context([t])
+        candidates = detector.analyze(ctx)
+        assert len(candidates) == 0, "Downward velocity without horizontal posture must not trigger fall"
+
+    def test_scenario_d_brief_crouch_bend_then_upright_no_fall(self):
+        """D: Person bending down or crouching then resuming upright posture must not trigger fall."""
+        detector = PersonFallDetector()
+        # Person bends down to tie shoes, then stands back up
+        boxes = [
+            [200.0, 100.0, 250.0, 250.0],  # upright (w=50, h=150, ar=0.33)
+            [200.0, 170.0, 290.0, 260.0],  # crouch/bend (w=90, h=90, ar=1.0)
+            [200.0, 105.0, 250.0, 255.0],  # stands back up (w=50, h=150, ar=0.33)
+            [200.0, 105.0, 250.0, 255.0],  # stands upright
+        ]
+        t = make_person_track("P-CROUCH", [0.0, 0.5, 1.0, 1.5], boxes)
+        ctx = make_person_context([t])
+        candidates = detector.analyze(ctx)
+        assert len(candidates) == 0, "Bending/crouching with recovery must not trigger fall"
+
+    def test_scenario_e_track_termination_without_post_event_evidence_no_fall(self):
+        """E: Track terminating at geometry change with zero post-event dwell must not confirm fall."""
+        detector = PersonFallDetector()
+        # Upright person has aspect ratio shift at the final frame, and track terminates immediately
+        boxes = [
+            [200.0, 100.0, 250.0, 250.0],  # upright (w=50, h=150, ar=0.33)
+            [200.0, 110.0, 250.0, 260.0],  # upright (w=50, h=150, ar=0.33)
+            [200.0, 160.0, 290.0, 250.0],  # single terminal observation (w=90, h=90, ar=1.0)
+        ]
+        t = make_person_track("P-DISAPPEAR", [0.0, 1.0, 2.0], boxes)
+        ctx = make_person_context([t])
+        candidates = detector.analyze(ctx)
+        assert len(candidates) == 0, "Single-frame terminal change without post-event evidence must not trigger fall"
+
+    def test_scenario_f_genuine_fall_upright_descent_persistent_ground_dwell(self):
+        """F: Upright -> rapid descent -> persistent horizontal low posture on ground triggers fall candidate."""
+        detector = PersonFallDetector()
+        boxes = [
+            [200.0, 100.0, 250.0, 250.0],  # upright (w=50, h=150, ar=0.33)
+            [200.0, 170.0, 270.0, 280.0],  # rapid downward descent (h=110, w=70, ar=0.64)
+            [200.0, 220.0, 360.0, 280.0],  # horizontal on ground (w=160, h=60, ar=2.67)
+            [200.0, 220.0, 360.0, 280.0],  # motionless on ground (persists!)
+            [200.0, 220.0, 360.0, 280.0],  # motionless on ground (persists!)
+        ]
+        t = make_person_track("P-GENUINE-FALL", [0.0, 0.5, 1.0, 1.5, 2.0], boxes)
+        ctx = make_person_context([t])
+        candidates = detector.analyze(ctx)
+        assert len(candidates) >= 1, "Genuine persistent fall must produce fall candidate"
+        cand = candidates[0]
+        assert cand.event_type == "POTENTIAL_PERSON_FALL"
+        assert cand.human_verification_required is True
+

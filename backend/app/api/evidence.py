@@ -329,4 +329,4 @@ def playback_evidence_clip(evidence_id: str, request: Request):
         playback_clip = original_clip
 
     range_header = request.headers.get("range")
-    return stream_video_file_with_ranges(playback_clip, range_header)
+    return stream_video_file_with_ranges(playback_clip, range_header, is_head=(request.method == "HEAD"))

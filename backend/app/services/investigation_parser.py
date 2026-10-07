@@ -143,17 +143,34 @@ class InvestigationParser:
             }
 
         # 1. Check for ethical and unsupported inquiries (identity, crime, facial recognition)
-        for pat in UNSUPPORTED_PATTERNS:
-            if re.search(pat, cleaned):
-                return {
-                    "is_supported": False,
-                    "message": (
-                        "I can currently investigate detected objects, timestamps, confidence levels, and events. "
-                        "Identity recognition, facial analysis, and criminal identification are not supported."
-                    ),
-                    "interpreted_filters": {},
-                    "result_type": "unsupported",
-                }
+        # Exempt non-biometric anonymous surveillance questions like "who was involved", "who took", "who interacted"
+        is_tracking_inquiry = bool(
+            re.search(r"\bwho\s+(?:was|is)\s+(?:involved|present|there|detected|seen|interacting|moving|active)\b", cleaned)
+            or re.search(r"\bwho\s+(?:took|interacted|moved|touched)\b", cleaned)
+            or re.search(r"\b(who\s+was\s+in|who\s+all\s+were)\b", cleaned)
+        )
+        if not is_tracking_inquiry:
+            for pat in UNSUPPORTED_PATTERNS:
+                if re.search(pat, cleaned):
+                    return {
+                        "is_supported": False,
+                        "message": (
+                            "I can currently investigate detected objects, timestamps, confidence levels, and events. "
+                            "Identity recognition, facial analysis, and criminal identification are not supported."
+                        ),
+                        "interpreted_filters": {},
+                        "result_type": "unsupported",
+                    }
+
+        # 1a. Check for generic Evidence queries (e.g. "show me the evidence", "show the evidence", "view evidence")
+        # Ensure it does not hijack domain event queries like "show smoke evidence", "show fire evidence", "show weapon evidence"
+        is_domain_event = any(k in cleaned for k in ["smoke", "fire", "weapon", "gun", "knife", "fall", "collision", "crash", "car", "person"])
+        if not is_domain_event and re.search(r"\b(?:show\s+(?:me\s+)?(?:the\s+)?(?:relevant\s+)?evidence|evidence\s+records?|view\s+evidence|evidence\s+clips?|evidence\s+snapshots?)\b", cleaned):
+            return {
+                "is_supported": True,
+                "result_type": "evidence",
+                "interpreted_filters": {},
+            }
 
         # 1b. Check for Phase 8 Face Detection queries (strictly visual region detections, no biometric identity)
         if re.search(r"\b(face\s+detections?|faces?\s+detected|show\s+faces?|detected\s+faces?)\b", cleaned):
@@ -378,7 +395,7 @@ class InvestigationParser:
                 },
             }
 
-        if re.search(r"\b(theft\s+patterns?|theft\s+events?|possible\s+thefts?|thefts?|stealing|stolen|what\s+was\s+stolen|object\s+takeaways?|takeaway\s+patterns?|takeaways?|burglary|taken|what\s+was\s+taken|was\s+anything\s+taken|did\s+anyone\s+take|anything\s+taken)\b", cleaned):
+        if re.search(r"\b(theft\s+patterns?|theft\s+events?|possible\s+thefts?|thefts?|stealing|stolen|what\s+was\s+stolen|object\s+takeaways?|takeaway\s+patterns?|takeaways?|burglary|taken|what\s+was\s+taken|was\s+anything\s+taken|did\s+anyone\s+take|anything\s+taken|take\s+anything|took\s+(?:the|an|anything|something)|who\s+took|interacted\s+with\s+(?:the\s+)?object|who\s+interacted|what\s+objects?\s+(?:were|was)\s+moved|objects?\s+moved|displaced\s+objects?)\b", cleaned):
             t_start, t_end, c_min, c_max = InvestigationParser._extract_time_and_conf(cleaned)
             filters: Dict[str, Any] = {"event_type": "POTENTIAL_THEFT"}
             if t_start is not None:
@@ -391,6 +408,32 @@ class InvestigationParser:
                 "is_supported": True,
                 "result_type": "security_events",
                 "interpreted_filters": filters,
+            }
+
+        if re.search(r"\b(who\s+was\s+involved|who\s+is\s+involved|involved\s+people|who\s+was\s+present|everyone\s+present|people\s+involved)\b", cleaned):
+            return {
+                "is_supported": True,
+                "result_type": "tracks",
+                "interpreted_filters": {
+                    "object_class": "person",
+                },
+            }
+
+        if re.search(r"\b(what\s+are\s+(?:the\s+)?people\s+doing|people\s+activity|what\s+is\s+everyone\s+doing)\b", cleaned):
+            return {
+                "is_supported": True,
+                "result_type": "tracks",
+                "interpreted_filters": {
+                    "object_class": "person",
+                    "query_action": True,
+                },
+            }
+
+        if re.search(r"\b(when\s+did\s+(?:the\s+)?(?:suspicious\s+activity|suspicious\s+event|incident|it|that)\s+(?:happen|occur|begin|start)|time\s+of\s+(?:the\s+)?incident)\b", cleaned):
+            return {
+                "is_supported": True,
+                "result_type": "security_events",
+                "interpreted_filters": {},
             }
 
         if re.search(r"\b(property\s+incidents?|property\s+events?|object\s+incidents?|object\s+events?)\b", cleaned):
@@ -476,7 +519,7 @@ class InvestigationParser:
                 },
             }
 
-        if re.search(r"\b(potential\s+falls?|person\s+falls?|falls?|falling|tripped|tripping)\b", cleaned):
+        if re.search(r"\b(potential\s+falls?|person\s+falls?|falls?|falling|tripped|tripping|did\s+(?:that|the|anyone|someone|he|she|this)?\s*(?:person|lady|man)?\s*(?:wearing\s+\w+)?\s*fall)\b", cleaned):
             return {
                 "is_supported": True,
                 "result_type": "security_events",

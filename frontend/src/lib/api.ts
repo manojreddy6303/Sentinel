@@ -34,7 +34,7 @@ export interface VideoMetadata {
 
 export interface VideoPlaybackStatusResponse {
   video_id: string;
-  status: "ready" | "converting" | "needs_conversion" | "unavailable";
+  status: "ready" | "converting" | "needs_conversion" | "deferred" | "unavailable";
   is_compatible: boolean;
   is_transcoded: boolean;
   message: string;

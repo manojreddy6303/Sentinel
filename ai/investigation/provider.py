@@ -232,8 +232,10 @@ class GeminiProvider(LLMProvider):
             "- Only use recognized classes: person, car, bicycle, motorcycle, bus, truck, backpack, handbag, suitcase, bottle, cell phone, chair, traffic light, stop sign.\n"
             "- Map 'vehicle' to object_classes=['car','bus','truck','motorcycle','bicycle'].\n"
             "- Do not infer colors.\n"
-            "- Inquiries about whether objects were taken, potential theft patterns, or takeaways (e.g. 'Was anything taken?', 'What was taken?', 'Was there a takeaway?') are VALID observable security event investigations. Set intent='investigate', result_type='events'. DO NOT flag as guardrail.\n"
-            "- Inquiries asking what a person/lady/man did or their actions/movements (e.g. 'What did the blue colour lady do?', 'What did the person do?', 'What did the man do?') are VALID visual activity inquiries. Set intent='investigate', object_classes=['person'], result_type='events'. DO NOT flag as guardrail.\n"
+            "- Inquiries about whether objects were taken, potential theft patterns, or takeaways (e.g. 'Was anything taken?', 'What was taken?', 'Was there a takeaway?') are VALID observable security event investigations. Set intent='investigate', event_type='POTENTIAL_THEFT', result_type='security_events'. DO NOT flag as guardrail.\n"
+            "- Inquiries asking what a person/lady/man did or their actions/movements (e.g. 'What did the blue colour lady do?', 'What did the person do?', 'What did the man do?') are VALID visual activity inquiries. If clothing color or attire is mentioned (e.g. 'blue', 'red'), extract color and set intent='investigate', object_classes=['person'], color=color, result_type='tracks'. Otherwise set intent='investigate', object_classes=['person'], result_type='tracks'. DO NOT flag as guardrail.\n"
+            "- Inquiries about falls or whether someone fell (e.g. 'Did that person fall?', 'Did anyone fall?', 'Did they fall?') are VALID visual security event investigations. Set intent='investigate', event_type='POTENTIAL_PERSON_FALL', category='person', result_type='security_events'. If a specific person or clothing color is mentioned, also extract track_id or color. DO NOT flag as guardrail.\n"
+            "- Inquiries asking about suspicious activity by a specific person or clothing color (e.g. 'Any suspicious activity by the person wearing blue?') are single-actor inquiries. Set intent='investigate', object_classes=['person'], color=color, result_type='tracks'. DO NOT set is_activity_request=true for single-actor inquiries.\n"
             "- ONLY mark intent='guardrail', guardrail_category='identity' if user asks who someone is by name, asks for their personal identity, or demands facial recognition biometric matching.\n"
             "- If user demands a legal court verdict or legal guilt conviction, mark intent='guardrail', guardrail_category='criminal_attribution'.\n"
             "- If user asks about summary/overview, set is_summary_request=true.\n"
@@ -286,11 +288,22 @@ class GeminiProvider(LLMProvider):
             "Never claim certainty that the video cannot establish. Use 'potential theft', 'evidence is consistent with', and 'review recommended'. Never state that a person stole something as an established fact.\n"
             "Always cite evidence and events using tags like [08.01s], [DET-XXXX], [EVENT-XXXX], or [EV-XXXX] where available.\n"
             "If no records were found, clearly state that no matching data was detected.\n"
+            "FACT DETERMINISM DIRECTIVE: Grounded facts must be strictly deterministic from the retrieved data. "
+            "If the retrieved records show NO person fall event (count=0 for POTENTIAL_PERSON_FALL), state unequivocally that no fall occurred or no fall event was detected. "
+            "If asked what a specific person did (e.g. person wearing blue), state exactly what the retrieved track activity summary describes (e.g. moved through the scene as a bystander, no security infractions recorded). "
+            "NEVER claim or imply that someone fell if no validated fall record exists in the retrieved evidence.\n"
             "Be professional, concise, and structured."
         )
 
+        history_context = ""
+        if history:
+            history_context = "Recent conversation context:\n" + "\n".join(
+                f"{item.get('role', 'user')}: {item.get('content', '')}" for item in history[-4:]
+            ) + "\n\n"
+
         data_summary = json.dumps(retrieved_data, indent=2, default=str)
         prompt = (
+            f"{history_context}"
             f"User Question: {user_query}\n\n"
             f"Retrieved Sentinel Ground Truth Records:\n{data_summary}\n\n"
         )
@@ -375,8 +388,40 @@ class MockLLMProvider(LLMProvider):
                 "result_type": "events",
             }
 
+        # Fall check
+        if any(term in q for term in ["fall", "falling", "collapse", "trip"]):
+            return {
+                "intent": "investigate",
+                "object_classes": ["person"],
+                "start_time": start_time,
+                "end_time": end_time,
+                "min_confidence": None,
+                "event_type": "POTENTIAL_PERSON_FALL",
+                "result_type": "security_events",
+                "is_summary_request": False,
+                "is_activity_request": False,
+                "guardrail_category": None,
+            }
+
         # Activity check
         if any(term in q for term in ["suspicious", "unusual", "activity", "noteworthy"]):
+            if any(c in q for c in ["blue", "red", "black", "white", "green", "yellow", "lady", "man", "person", "track"]):
+                from backend.app.services.investigation_parser import InvestigationParser
+                p_res = InvestigationParser.parse_query(user_query)
+                if p_res.get("result_type") == "tracks":
+                    f = p_res.get("interpreted_filters", {})
+                    return {
+                        "intent": "investigate",
+                        "object_classes": [f.get("object_class", "person")],
+                        "start_time": f.get("start_time"),
+                        "end_time": f.get("end_time"),
+                        "min_confidence": f.get("min_confidence"),
+                        "track_id": f.get("track_id"),
+                        "color": f.get("color"),
+                        "result_type": "tracks",
+                        "is_summary_request": False,
+                        "is_activity_request": False,
+                    }
             return {
                 "intent": "activity_analysis",
                 "is_activity_request": True,

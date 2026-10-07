@@ -13,6 +13,7 @@ Coordinates the full AI investigation lifecycle:
 
 import json
 import logging
+import re
 from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy import func
 
@@ -104,9 +105,9 @@ class InvestigationOrchestrator:
             except (LLMProviderError, ValidationError) as err:
                 logger.warning(f"LLM intent generation/validation failed: {err}. Falling back to deterministic analysis.")
                 used_mode = "deterministic_fallback"
-                structured_intent = self._deterministic_intent_fallback(cleaned_query)
+                structured_intent = self._deterministic_intent_fallback(cleaned_query, history)
         else:
-            structured_intent = self._deterministic_intent_fallback(cleaned_query)
+            structured_intent = self._deterministic_intent_fallback(cleaned_query, history)
 
         # Step 4: Branch on intent type
         if structured_intent.get("is_summary_request"):
@@ -117,9 +118,82 @@ class InvestigationOrchestrator:
 
         return self._handle_filtered_investigation(video_id, cleaned_query, structured_intent, history, used_mode)
 
-    def _deterministic_intent_fallback(self, query: str) -> Dict[str, Any]:
+    def _extract_history_context(self, history: Optional[List[Dict[str, str]]]) -> Dict[str, Any]:
+        """Extract conversational target context (track_id, color, event_type) from previous turns."""
+        ctx: Dict[str, Any] = {"track_id": None, "color": None, "event_type": None}
+        if not history:
+            return ctx
+        for item in reversed(history):
+            content = item.get("content", "")
+            if not ctx["track_id"]:
+                m_trk = re.search(r"\b(TRACK-\d+)\b", content, re.IGNORECASE)
+                if m_trk:
+                    ctx["track_id"] = m_trk.group(1).upper()
+            if not ctx["color"]:
+                m_col = re.search(r"\b(blue|red|green|black|white|yellow|orange|silver|gray|grey)\b", content, re.IGNORECASE)
+                if m_col:
+                    ctx["color"] = m_col.group(1).lower()
+            if not ctx["event_type"]:
+                if any(w in content.lower() for w in ["theft", "takeaway", "stolen", "burglary"]):
+                    ctx["event_type"] = "POTENTIAL_THEFT"
+                elif any(w in content.lower() for w in ["collision", "crash"]):
+                    ctx["event_type"] = "POTENTIAL_VEHICLE_COLLISION"
+                elif any(w in content.lower() for w in ["fall"]):
+                    ctx["event_type"] = "POTENTIAL_PERSON_FALL"
+            if ctx["track_id"] and ctx["color"]:
+                break
+        return ctx
+
+    def _deterministic_intent_fallback(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
         """Use Phase 5A parser to extract structured intent when LLM is unavailable."""
         q = query.lower()
+        hist_ctx = self._extract_history_context(history)
+        has_referential_pronoun = bool(
+            re.search(r"\b(that person|this person|the person|they|them|he|she|him|her)\b", q)
+        )
+
+        # Show evidence follow-up
+        if any(w in q for w in ["show me the evidence", "show the evidence", "show evidence", "see the evidence", "view evidence"]):
+            return {
+                "intent": "investigate",
+                "is_supported": True,
+                "is_summary_request": False,
+                "is_activity_request": False,
+                "object_class": None,
+                "start_time": None,
+                "end_time": None,
+                "min_confidence": None,
+                "event_type": hist_ctx.get("event_type"),
+                "result_type": "evidence",
+            }
+
+        # Spatial departure / movement follow-up
+        if any(w in q for w in ["where did they go", "where did the person go", "where did that person go", "where did he go", "where did she go"]):
+            return {
+                "intent": "investigate",
+                "is_supported": True,
+                "is_summary_request": False,
+                "is_activity_request": False,
+                "object_class": "person",
+                "start_time": None,
+                "end_time": None,
+                "min_confidence": None,
+                "track_id": hist_ctx.get("track_id"),
+                "color": hist_ctx.get("color"),
+                "result_type": "tracks",
+            }
+
+        # Temporal follow-up
+        if any(w in q for w in ["when did that happen", "when did it happen", "what time did it happen", "when did the suspicious activity begin"]):
+            return {
+                "intent": "investigate",
+                "is_supported": True,
+                "is_summary_request": False,
+                "is_activity_request": False,
+                "event_type": hist_ctx.get("event_type") or "POTENTIAL_THEFT",
+                "result_type": "security_events",
+            }
+
         if any(w in q for w in ["summary", "summarize", "overview", "what happened in this video", "what happened", "what occurred"]):
             parsed = self.investigation_service.parser.parse_query(query)
             filters = parsed.get("interpreted_filters", {})
@@ -148,9 +222,12 @@ class InvestigationOrchestrator:
                 "min_confidence": None,
                 "result_type": "events",
             }
+
         if any(w in q for w in ["theft", "stealing", "takeaway", "burglary", "stolen", "taken", "take", "robbery"]):
             parsed = self.investigation_service.parser.parse_query(query)
             filters = parsed.get("interpreted_filters", {})
+            target_tid = filters.get("track_id") or (hist_ctx.get("track_id") if has_referential_pronoun else None)
+            target_col = filters.get("color") or (hist_ctx.get("color") if has_referential_pronoun else None)
             return {
                 "intent": "investigate",
                 "is_supported": True,
@@ -161,10 +238,52 @@ class InvestigationOrchestrator:
                 "end_time": filters.get("end_time"),
                 "min_confidence": filters.get("min_confidence"),
                 "event_type": "POTENTIAL_THEFT",
+                "track_id": target_tid,
+                "color": target_col,
+                "result_type": "security_events",
+            }
+
+        if any(w in q for w in ["fall", "falling", "collapse", "collapsed", "trip", "tripped", "person down"]):
+            parsed = self.investigation_service.parser.parse_query(query)
+            filters = parsed.get("interpreted_filters", {})
+            target_tid = filters.get("track_id") or (hist_ctx.get("track_id") if has_referential_pronoun else None)
+            target_col = filters.get("color") or (hist_ctx.get("color") if has_referential_pronoun else None)
+            return {
+                "intent": "investigate",
+                "is_supported": True,
+                "is_summary_request": False,
+                "is_activity_request": False,
+                "object_class": "person",
+                "start_time": filters.get("start_time"),
+                "end_time": filters.get("end_time"),
+                "min_confidence": filters.get("min_confidence"),
+                "event_type": "POTENTIAL_PERSON_FALL",
+                "category": "person",
+                "track_id": target_tid,
+                "color": target_col,
                 "result_type": "security_events",
             }
 
         if any(w in q for w in ["suspicious", "unusual", "activity", "noteworthy", "security event", "security events", "review"]):
+            parsed = self.investigation_service.parser.parse_query(query)
+            filters = parsed.get("interpreted_filters", {})
+            target_tid = filters.get("track_id") or (hist_ctx.get("track_id") if has_referential_pronoun else None)
+            target_col = filters.get("color") or (hist_ctx.get("color") if has_referential_pronoun else None)
+            target_cls = filters.get("object_class")
+            if target_tid or target_col or target_cls == "person" or "person" in q or "lady" in q or "man" in q:
+                return {
+                    "intent": "investigate",
+                    "is_supported": True,
+                    "is_summary_request": False,
+                    "is_activity_request": False,
+                    "object_class": "person",
+                    "start_time": filters.get("start_time"),
+                    "end_time": filters.get("end_time"),
+                    "min_confidence": filters.get("min_confidence"),
+                    "track_id": target_tid,
+                    "color": target_col,
+                    "result_type": "tracks",
+                }
             return {
                 "intent": "activity_analysis",
                 "is_supported": True,
@@ -190,8 +309,8 @@ class InvestigationOrchestrator:
             "min_confidence": filters.get("min_confidence"),
             "event_type": filters.get("event_type"),
             "category": filters.get("category"),
-            "track_id": filters.get("track_id"),
-            "color": filters.get("color"),
+            "track_id": filters.get("track_id") or (hist_ctx.get("track_id") if has_referential_pronoun else None),
+            "color": filters.get("color") or (hist_ctx.get("color") if has_referential_pronoun else None),
             "result_type": parsed.get("result_type", "detections"),
             "fallback_message": parsed.get("message"),
         }
@@ -780,6 +899,8 @@ class InvestigationOrchestrator:
                     f"Sentinel identified {count} verified person incident event(s). "
                     f"Earliest observation ({ev_type.replace('_', ' ')}) around {ts:.1f}s. {desc}"
                 )
+            if target_type == "POTENTIAL_PERSON_FALL" or "fall" in str(target_type).lower():
+                return "No reliable person fall was detected in the available Sentinel data."
             return "No reliable person incident was detected in the available Sentinel data."
 
         if is_vehicle_query:
@@ -804,7 +925,34 @@ class InvestigationOrchestrator:
                 dur = lead.get("duration_seconds") or 0.0
                 end_ts = ts + dur if dur > 0 else ts
                 desc = lead.get("description", "")
+                lead_tid = lead.get("track_id")
+                target_track_id = filters.get("track_id")
+                target_color = filters.get("color")
                 interval_str = f"[{ts:.1f}s - {end_ts:.1f}s]" if dur > 0 else f"around {ts:.1f}s"
+
+                # Check if target track is a bystander
+                if target_track_id and lead_tid and target_track_id.upper() != lead_tid.upper():
+                    bystander_desc = f" ({target_color} clothing)" if target_color else ""
+                    parts = [
+                        "### VIDEO ACTIVITY SUMMARY",
+                        f"- The targeted individual [{target_track_id}]{bystander_desc} was NOT observed taking or removing any property.",
+                        f"- The individual remained present in the scene as an uninvolved bystander with no recorded security infractions.",
+                        f"- Separately, Sentinel detected a potential theft/takeaway pattern involving a different individual [{lead_tid}].",
+                        f"- Relevant activity occurred around the detected incident interval {interval_str}.",
+                        "- Preserved evidence is available for review.",
+                        "",
+                        "### OBSERVED EVIDENCE",
+                        f"- **Security Event:** Potential Theft Pattern detected around {ts:.1f}s involving Track [{lead_tid}].",
+                        f"- **Visual Telemetry:** {desc}" if desc else f"- **Visual Telemetry:** Object interaction observed around {ts:.1f}s involving Track [{lead_tid}].",
+                        f"- **Bystander Status:** [{target_track_id}]{bystander_desc} had zero property interactions or security infractions.",
+                        "",
+                        "### INTERPRETATION",
+                        f"- Visual evidence does NOT attribute property removal to [{target_track_id}].",
+                        f"- Evidence is consistent with a potential takeaway pattern involving Track [{lead_tid}].",
+                        "- Review recommended (Human verification required; Sentinel reports observational patterns and does not establish legal culpability).",
+                    ]
+                    return "\n".join(parts)
+
                 parts = [
                     "### VIDEO ACTIVITY SUMMARY",
                     "- A potential theft/takeaway sequence was detected.",
@@ -824,6 +972,19 @@ class InvestigationOrchestrator:
                 ]
                 return "\n".join(parts)
             return "Search executed successfully. No potential theft pattern was detected in the available visual evidence."
+
+        if result_type == "evidence":
+            if count == 0:
+                return "Search executed successfully. No preserved forensic evidence records were found in the database."
+            first = results[0]
+            ts = first.get("timestamp", 0.0)
+            ev_type = first.get("evidence_type", "snapshot_and_clip")
+            obj = first.get("object_class") or "incident"
+            return (
+                f"Sentinel identified {count} verified forensic evidence record(s) in the secure vault. "
+                f"Earliest evidence was captured around {ts:.1f}s ({ev_type.replace('_', ' ')}) for {obj}. "
+                "Preserved snapshot and video clips are available for forensic playback and human verification."
+            )
 
         if result_type == "tracks":
             if count == 0:

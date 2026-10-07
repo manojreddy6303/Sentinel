@@ -299,10 +299,11 @@ def transcode_to_h264(input_path: Path, output_path: Path) -> Path:
         except Exception:
             pass
 
+    ffmpeg_threads = str(getattr(settings, "FFMPEG_TRANSCODE_THREADS", 1))
     cmd = [
         ffmpeg_exe,
         "-y",
-        "-threads", "1",
+        "-threads", ffmpeg_threads,
         "-i", str(input_path),
         "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-c:v", "libx264",
@@ -668,7 +669,11 @@ def get_evidence_playback_status(evidence_id: str, original_clip_path: Optional[
     }
 
 
-def stream_video_file_with_ranges(file_path: Path, range_header: Optional[str] = None) -> Response:
+def stream_video_file_with_ranges(
+    file_path: Path,
+    range_header: Optional[str] = None,
+    is_head: bool = False,
+) -> Response:
     """
     Stream a video file supporting RFC 7233 HTTP Range requests (206 Partial Content).
     Enables seeking/scrubbing across the video timeline in modern web browsers.
@@ -684,6 +689,17 @@ def stream_video_file_with_ranges(file_path: Path, range_header: Optional[str] =
     file_size = file_path.stat().st_size
     content_type = "video/mp4"
     chunk_size = 64 * 1024  # 64 KB
+
+    if is_head:
+        return Response(
+            content=b"",
+            status_code=status.HTTP_200_OK,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+                "Content-Type": content_type,
+            },
+        )
 
     if not range_header:
         # Full content response (200 OK)

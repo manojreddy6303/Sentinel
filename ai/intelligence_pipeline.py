@@ -455,6 +455,19 @@ class SecurityIntelligencePipeline:
                     sampled_frames_cache=sampled_frames,
                 )
                 if recovered_micro_dets:
+                    # Save existing visual attributes and clothing color history before tracker reset
+                    prior_track_attrs = {
+                        t.track_id: {
+                            "color": t.color,
+                            "color_confidence": t.color_confidence,
+                            "visual_attributes": t.visual_attributes,
+                            "attribute_history": list(t.attribute_history) if t.attribute_history else [],
+                            "object_class": t.object_class,
+                            "current_bbox": t.current_bbox,
+                        }
+                        for t in all_tracks
+                    }
+
                     # Re-run tracking to integrate recovered micro-objects alongside baseline detections
                     self.tracker.reset(video_id=video_id)
                     all_ts = sorted(set(list(events_by_time.keys()) + [rd["timestamp"] for rd in recovered_micro_dets]))
@@ -474,9 +487,42 @@ class SecurityIntelligencePipeline:
                             frame_height=video_h,
                         )
                     all_tracks = self.tracker.finalize()
+
+                    # O(1) attribute restoration with spatial fallback
                     for trk in all_tracks:
-                        if trk.object_class == "person":
+                        prior = prior_track_attrs.get(trk.track_id)
+                        if prior and prior["object_class"] == trk.object_class:
+                            trk.color = prior["color"]
+                            trk.color_confidence = prior["color_confidence"]
+                            trk.visual_attributes = prior["visual_attributes"]
+                            trk.attribute_history = prior["attribute_history"]
+                        elif trk.object_class == "person":
+                            for p_id, p_data in prior_track_attrs.items():
+                                if p_data["object_class"] == "person" and p_data["color"]:
+                                    p_bbox = p_data.get("current_bbox")
+                                    t_bbox = trk.current_bbox
+                                    if p_bbox and t_bbox:
+                                        p_x1 = p_bbox.x1 if hasattr(p_bbox, "x1") else p_bbox.get("x1", 0)
+                                        p_y1 = p_bbox.y1 if hasattr(p_bbox, "y1") else p_bbox.get("y1", 0)
+                                        p_x2 = p_bbox.x2 if hasattr(p_bbox, "x2") else p_bbox.get("x2", 0)
+                                        p_y2 = p_bbox.y2 if hasattr(p_bbox, "y2") else p_bbox.get("y2", 0)
+                                        t_x1 = t_bbox.x1 if hasattr(t_bbox, "x1") else t_bbox.get("x1", 0)
+                                        t_y1 = t_bbox.y1 if hasattr(t_bbox, "y1") else t_bbox.get("y1", 0)
+                                        t_x2 = t_bbox.x2 if hasattr(t_bbox, "x2") else t_bbox.get("x2", 0)
+                                        t_y2 = t_bbox.y2 if hasattr(t_bbox, "y2") else t_bbox.get("y2", 0)
+                                        p_cx = (p_x1 + p_x2) / 2
+                                        p_cy = (p_y1 + p_y2) / 2
+                                        t_cx = (t_x1 + t_x2) / 2
+                                        t_cy = (t_y1 + t_y2) / 2
+                                        if abs(p_cx - t_cx) < 150 and abs(p_cy - t_cy) < 150:
+                                            trk.color = p_data["color"]
+                                            trk.color_confidence = p_data["color_confidence"]
+                                            trk.visual_attributes = p_data["visual_attributes"]
+                                            trk.attribute_history = p_data["attribute_history"]
+                                            break
+                        if trk.object_class == "person" and not trk.color:
                             aggregate_track_clothing_color(trk)
+
                     validated_tracks = [t for t in all_tracks if t.is_validated]
         specialized_tracks = specialized_tracker.finalize()
         valid_spec_obs = [
