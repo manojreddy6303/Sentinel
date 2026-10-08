@@ -167,6 +167,8 @@ export default function VideoUpload({
   const [processingState, setProcessingState] = useState<ProcessingState>("idle");
   const [processingResult, setProcessingResult] = useState<ProcessVideoResponse | null>(null);
   const [processingError, setProcessingError] = useState<string | null>(null);
+  const [currentStage, setCurrentStage] = useState<string>("Preparing video");
+  const [stageProgress, setStageProgress] = useState<number>(10);
   const [events, setEvents] = useState<DetectionEvent[]>([]);
   const [timelineEvents, setTimelineEvents] = useState<GroupedEvent[]>([]);
   const [activeView, setActiveView] = useState<ViewMode>(initialViewMode || "timeline");
@@ -966,11 +968,26 @@ export default function VideoUpload({
     setEvents([]);
     setTimelineEvents([]);
     setProcessingResult(null);
+    setCurrentStage("Preparing video");
+    setStageProgress(10);
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const meta = await getVideoMetadata(requestedVideoId);
+        if (meta.processing_stage) setCurrentStage(meta.processing_stage);
+        if (typeof meta.progress_percentage === "number") setStageProgress(meta.progress_percentage);
+      } catch {
+        // ignore poll errors
+      }
+    }, 1200);
 
     try {
       const result = await processVideo(requestedVideoId, force);
+      clearInterval(pollInterval);
       if (isStaleVideo(requestedVideoId)) return;
       setProcessingResult(result);
+      setStageProgress(100);
+      setCurrentStage("Completed");
 
       // Fetch grouped timeline events and raw events
       const timelineRes = await getVideoTimeline(requestedVideoId);
@@ -996,6 +1013,7 @@ export default function VideoUpload({
 
       setProcessingState("completed");
     } catch (err: unknown) {
+      clearInterval(pollInterval);
       if (isStaleVideo(requestedVideoId)) return;
       const msg = err instanceof Error ? err.message : "Processing failed.";
       setProcessingError(msg);
@@ -1410,20 +1428,72 @@ export default function VideoUpload({
               )}
             </div>
 
-            {/* Processing Feedback */}
+            {/* Processing Feedback with Dynamic Multi-Stage Progress */}
             {processingState === "processing" && (
-              <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/30 p-4">
-                <div className="flex items-center gap-3">
-                  <svg className="animate-spin h-5 w-5 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  <div>
-                    <p className="text-sm font-semibold text-emerald-400">Extracting Detections &amp; Grouping Events...</p>
-                    <p className="text-xs text-zinc-400 mt-0.5">
-                      Running OpenCV frame sampling, YOLOv8 detection, temporal event window grouping, and relational DB persistence.
-                    </p>
+              <div className="rounded-xl bg-[#171A20] border border-[#2A3038] p-5 space-y-4 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <svg className="animate-spin h-5 w-5 text-[#19B89A] shrink-0" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    <div>
+                      <p className="text-sm font-semibold text-[#F5F7FA]">
+                        Processing Pipeline: <span className="text-[#19B89A]">{currentStage}</span>
+                      </p>
+                      <p className="text-xs text-[#A7AFBA] mt-0.5">
+                        Multi-stage AI intelligence analysis across detections, tracking, spatial correlation, and forensic indexing.
+                      </p>
+                    </div>
                   </div>
+                  <span className="text-sm font-mono font-bold text-[#19B89A]">{stageProgress}%</span>
+                </div>
+
+                {/* Progress Bar */}
+                <div className="w-full bg-[#1D2128] rounded-full h-2 overflow-hidden border border-[#2A3038]">
+                  <div
+                    className="bg-[#19B89A] h-2 rounded-full transition-all duration-500 ease-out"
+                    style={{ width: `${Math.max(5, stageProgress)}%` }}
+                  />
+                </div>
+
+                {/* 7 Canonical Pipeline Stages Chips */}
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {[
+                    "Preparing video",
+                    "Detecting people/objects",
+                    "Tracking",
+                    "Analyzing interactions",
+                    "Correlating events",
+                    "Generating evidence",
+                    "Finalizing searchable index",
+                  ].map((stageName, idx) => {
+                    const stagePercentages = [10, 35, 55, 70, 80, 90, 98];
+                    const targetPct = stagePercentages[idx];
+                    const isDone = stageProgress > targetPct;
+                    const isActive = currentStage === stageName || (stageProgress >= targetPct && !isDone);
+                    return (
+                      <span
+                        key={stageName}
+                        className={`text-[11px] font-sans px-2.5 py-1 rounded-md border flex items-center gap-1.5 transition-colors ${
+                          isDone
+                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                            : isActive
+                            ? "bg-[#19B89A]/20 text-[#19B89A] border-[#19B89A]/50 font-semibold"
+                            : "bg-[#1D2128] text-zinc-500 border-zinc-800"
+                        }`}
+                      >
+                        {isDone ? (
+                          <span className="text-emerald-400 font-bold">✓</span>
+                        ) : isActive ? (
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#19B89A] animate-pulse" />
+                        ) : (
+                          <span className="text-zinc-600">{idx + 1}</span>
+                        )}
+                        {stageName}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1678,11 +1748,44 @@ export default function VideoUpload({
                               ? "Safety Guardrail Enforced"
                               : "AI Reasoning Unavailable — Deterministic Fallback"}
                           </span>
-                          {aiResponse.count !== undefined && (
-                            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
-                              Matches: {aiResponse.count}
-                            </span>
-                          )}
+                          {(() => {
+                            const hasEntities = aiResponse.canonical_entity_count !== undefined && aiResponse.canonical_entity_count !== null;
+                            const trackCount = aiResponse.canonical_entity_count ?? aiResponse.sources?.tracks?.length;
+                            const eventCount = (aiResponse.sources?.events?.length || 0) + (aiResponse.sources?.security_events?.length || 0);
+                            const evidenceCount = aiResponse.sources?.evidence?.length || 0;
+                            const isMultiSource = (trackCount ? 1 : 0) + (eventCount ? 1 : 0) + (evidenceCount ? 1 : 0) > 1;
+
+                            if (isMultiSource || hasEntities) {
+                              return (
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {trackCount !== undefined && trackCount > 0 && (
+                                    <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-teal-300 border border-teal-500/30">
+                                      Entities: {trackCount}
+                                    </span>
+                                  )}
+                                  {eventCount > 0 && (
+                                    <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-amber-300 border border-amber-500/30">
+                                      Events: {eventCount}
+                                    </span>
+                                  )}
+                                  {evidenceCount > 0 && (
+                                    <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-indigo-300 border border-indigo-500/30">
+                                      Evidence: {evidenceCount}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            }
+
+                            if (aiResponse.count !== undefined) {
+                              return (
+                                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
+                                  Records: {aiResponse.count}
+                                </span>
+                              );
+                            }
+                            return null;
+                          })()}
                         </div>
                         <span className="text-[11px] font-mono text-zinc-500 truncate max-w-xs">
                           Query: &ldquo;{aiResponse.query}&rdquo;

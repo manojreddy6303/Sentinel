@@ -142,17 +142,15 @@ class RobustColorExtractor:
                 "reason": reason,
             }
 
-        # Optional skin-tone mask exclusion for neck/chest/face margins
+        # Optional skin-tone mask exclusion for neck/chest margins - restrict to top slice of ROI
         valid_mask = np.ones((rh, rw), dtype=bool)
         if filter_skin:
-            skin_h = ((h <= 24) | (h >= 168))
-            skin_s = (s >= 25) & (s <= 175)
-            skin_v = (v >= 45)
-            skin_mask = skin_h & skin_s & skin_v
-            # Only filter skin if it leaves at least 30% of pixels
-            non_skin_count = np.count_nonzero(~skin_mask)
-            if non_skin_count >= 0.30 * (rh * rw):
-                valid_mask = ~skin_mask
+            neck_y = max(1, int(rh * 0.18))
+            skin_h = ((h[:neck_y, :] <= 25) | (h[:neck_y, :] >= 168))
+            skin_s = (s[:neck_y, :] >= 35) & (s[:neck_y, :] <= 150)
+            skin_v = (v[:neck_y, :] >= 55)
+            skin_mask_neck = skin_h & skin_s & skin_v
+            valid_mask[:neck_y, :][skin_mask_neck] = False
 
         total_valid = int(np.count_nonzero(valid_mask))
         if total_valid < 16:
@@ -172,34 +170,43 @@ class RobustColorExtractor:
             c: 0 for c in cls.COLOR_VOCABULARY if c not in ["unknown", "other", "uncertain"]
         }
 
-        # 1. Achromatic: Black (V < 45, S < 85)
-        black_mask = valid_mask & (v < 45) & (s < 85)
+        # 1. Achromatic: Black
+        # In surveillance/CCTV footage, dark fabrics under cool fluorescent or low light
+        # exhibit slight sensor/illumination cast with weak blue margin (< 12) or weak B-R (< 16).
+        b_val, g_val, r_val = cv2.split(roi_bgr)
+        b_r_diff = b_val.astype(int) - r_val.astype(int)
+        blue_margin = b_val.astype(int) - np.maximum(r_val.astype(int), g_val.astype(int))
+
+        cool_cast_achromatic = (v < 75) & (h >= 75) & (h <= 140) & ((blue_margin < 12) | (b_r_diff < 16) | (s < 45))
+
+        black_mask = valid_mask & (((v < 38)) | ((v < 72) & (s < 38)) | (cool_cast_achromatic & (v < 72)))
         counts["black"] = int(np.count_nonzero(black_mask))
 
         # 2. Achromatic: White (S < 30 and V > 185)
         white_mask = valid_mask & (s < 30) & (v > 185)
         counts["white"] = int(np.count_nonzero(white_mask))
 
-        # 3. Achromatic: Grey / Silver (S < 35 and 45 <= V <= 185)
-        grey_base = valid_mask & (s < 35) & (v >= 45) & (v <= 185)
+        # 3. Achromatic: Grey / Silver (S < 40 and 52 <= V <= 185, not white/black)
+        grey_base = valid_mask & ~black_mask & ~white_mask & (((s < 40) & (v >= 52) & (v <= 185)) | (cool_cast_achromatic & (v >= 75)))
         silver_mask = grey_base & (s < 25) & (v >= 140)
         counts["silver"] = int(np.count_nonzero(silver_mask))
         counts["grey"] = int(np.count_nonzero(grey_base & ~silver_mask))
 
-        # Chromatic mask (S >= 40 and V >= 45 and not black/white/grey)
+        # Chromatic mask: strictly pixels that are NOT achromatic, with sufficient saturation & value
         achromatic_combined = black_mask | white_mask | grey_base
-        chromatic = valid_mask & ~achromatic_combined & (s >= 38) & (v >= 45)
+        chromatic = valid_mask & ~achromatic_combined & (s >= 35) & (v >= 40)
 
         # Red: H in [0, 10] or [165, 180]
         red_mask = chromatic & ((h <= 10) | (h >= 165))
         counts["red"] = int(np.count_nonzero(red_mask))
 
-        # Orange: H in (10, 24] and V >= 60
-        orange_mask = chromatic & (h > 10) & (h <= 24) & (v >= 60)
+        # Orange: H in (10, 24] and V >= 55 and S >= 55 and (R - B >= 30) (genuine saturated chromatic orange)
+        orange_red_diff = r_val.astype(int) - b_val.astype(int)
+        orange_mask = chromatic & (h > 10) & (h <= 24) & (v >= 55) & (s >= 55) & (orange_red_diff >= 30)
         counts["orange"] = int(np.count_nonzero(orange_mask))
 
-        # Brown: H in (10, 24] and 40 <= V < 120 and S >= 38
-        brown_mask = chromatic & (h > 10) & (h <= 24) & (v >= 40) & (v < 120) & ~orange_mask
+        # Brown: H in (10, 24] and 35 <= V < 120 and S >= 35
+        brown_mask = chromatic & (h > 10) & (h <= 24) & (v >= 35) & (v < 120) & ~orange_mask
         counts["brown"] = int(np.count_nonzero(brown_mask))
 
         # Yellow: H in (24, 38]
@@ -211,24 +218,38 @@ class RobustColorExtractor:
         counts["green"] = int(np.count_nonzero(green_mask))
 
         # Blue: H in (85, 135]
-        blue_mask = chromatic & (h > 85) & (h <= 135)
+        # True blue requires genuine chromatic presence:
+        blue_mask = chromatic & (h > 85) & (h <= 135) & (blue_margin >= 10) & (s >= 40)
         counts["blue"] = int(np.count_nonzero(blue_mask))
 
-        # Sort counts descending
+        # Achromatic-First Reliability Model:
+        achromatic_cnt = counts["black"] + counts["white"] + counts["grey"] + counts["silver"]
+        chromatic_cnt = sum(counts[c] for c in cls.CHROMATIC_FAMILIES)
+        achromatic_ratio = achromatic_cnt / float(total_valid)
+        median_sat = float(np.median(s[valid_mask]))
+
         sorted_counts = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
         top_color, top_cnt = sorted_counts[0]
         second_color, second_cnt = sorted_counts[1] if len(sorted_counts) > 1 else (None, 0)
 
-        # Check chromatic prominence: if a chromatic color represents >= 18% of valid pixels,
-        # it frequently identifies distinctive apparel or vehicle trim over neutral background
         chrom_counts = [(c, counts[c]) for c in cls.CHROMATIC_FAMILIES if counts[c] > 0]
-        if chrom_counts:
-            best_chrom_color, best_chrom_cnt = max(chrom_counts, key=lambda kv: kv[1])
-            chrom_ratio = best_chrom_cnt / float(total_valid)
-            if chrom_ratio >= 0.18 and top_color in ["grey", "silver", "black"] and (top_cnt / float(total_valid)) < 0.65:
-                # Promote chromatic color over neutral background/shadow
+        best_chrom_color, best_chrom_cnt = max(chrom_counts, key=lambda kv: kv[1]) if chrom_counts else (None, 0)
+        best_chrom_ratio = best_chrom_cnt / float(total_valid)
+
+        achrom_counts = [(c, counts[c]) for c in ["black", "white", "grey", "silver"] if counts[c] > 0]
+        top_achrom_color, top_achrom_cnt = max(achrom_counts, key=lambda kv: kv[1]) if achrom_counts else ("grey", 0)
+
+        # Achromatic dominance rule:
+        # A dominant achromatic garment remains achromatic unless chromatic presence is genuinely established.
+        if top_color in ["black", "grey", "silver", "white"]:
+            if best_chrom_cnt > 0 and best_chrom_ratio >= 0.22 and best_chrom_cnt >= 0.65 * top_achrom_cnt and median_sat >= 35.0:
                 second_color, second_cnt = top_color, top_cnt
                 top_color, top_cnt = best_chrom_color, best_chrom_cnt
+        else:
+            # If top color is chromatic, verify that chromatic is not completely eclipsed by achromatic
+            if best_chrom_cnt <= 0.60 * achromatic_cnt and best_chrom_ratio < 0.20:
+                second_color, second_cnt = top_color, top_cnt
+                top_color, top_cnt = top_achrom_color, top_achrom_cnt
 
         dominant_ratio = top_cnt / float(total_valid)
         secondary_ratio = second_cnt / float(total_valid) if second_cnt > 0 else 0.0
@@ -238,7 +259,12 @@ class RobustColorExtractor:
             final_conf = 0.20
         else:
             final_dominant = top_color
-            final_conf = min(0.98, max(0.35, dominant_ratio))
+            if final_dominant in cls.CHROMATIC_FAMILIES:
+                sat_scale = min(1.0, max(0.40, median_sat / 60.0))
+                margin = max(0.0, (top_cnt - top_achrom_cnt) / float(total_valid))
+                final_conf = min(0.95, max(0.35, dominant_ratio * sat_scale * (0.8 + 0.2 * margin)))
+            else:
+                final_conf = min(0.92, max(0.40, dominant_ratio))
 
         final_secondary = second_color if secondary_ratio >= 0.15 else None
         final_sec_conf = min(0.95, secondary_ratio) if final_secondary else None
@@ -254,6 +280,7 @@ class RobustColorExtractor:
             "color_counts": {k: v for k, v in counts.items() if v > 0},
             "total_pixels": total_valid,
         }
+
 
 
 class TemporalColorFilter:

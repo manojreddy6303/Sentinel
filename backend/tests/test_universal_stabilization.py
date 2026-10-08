@@ -281,7 +281,7 @@ def test_multi_video_isolation_prevents_cross_video_leakage():
         inv_svc = InvestigationService()
 
         # Query Video A for people
-        res_a_people = inv_svc.investigate(vid_a, "How many people were detected?")
+        res_a_people = inv_svc.investigate(vid_a, "How many person detections were recorded?")
         assert res_a_people["count"] == 2
         assert res_a_people["track_count"] == 1
         assert "2 validated person detection observations across 1 anonymous tracks" in res_a_people["message"]
@@ -297,7 +297,7 @@ def test_multi_video_isolation_prevents_cross_video_leakage():
         assert res_b_suitcase["results"][0]["object_class"] == "suitcase"
 
         # Query Video B for people (must be 0, no leakage from Video A)
-        res_b_people = inv_svc.investigate(vid_b, "How many people were detected?")
+        res_b_people = inv_svc.investigate(vid_b, "How many person detections were recorded?")
         assert res_b_people["count"] == 0
         assert res_b_people["track_count"] == 0
 

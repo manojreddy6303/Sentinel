@@ -123,12 +123,22 @@ class PersonAttributeAnalyzer:
 
         # =====================================================================
         # 1. UPPER BODY (TORSO) CLOTHING COLOR
-        # Anatomic boundaries: 18% to 52% height, 20% to 80% width
+        # Anatomic boundaries: 20% to 52% height, 25% to 75% width
+        # Tightened to reduce background, wall, neck, and edge contamination
         # =====================================================================
-        uy1 = int(ph * 0.18)
+        uy1 = int(ph * 0.20)
         uy2 = int(ph * 0.52)
-        ux1 = int(pw * 0.20)
-        ux2 = int(pw * 0.80)
+        ux1 = int(pw * 0.25)
+        ux2 = int(pw * 0.75)
+
+        if is_left_clipped:
+            ux1 = int(pw * 0.35)
+        if is_right_clipped:
+            ux2 = int(pw * 0.65)
+        if is_top_clipped:
+            uy1 = int(ph * 0.26)
+        if is_bottom_clipped:
+            uy2 = int(ph * 0.48)
 
         upper_crop = crop[uy1:uy2, ux1:ux2]
         if upper_crop.size == 0:

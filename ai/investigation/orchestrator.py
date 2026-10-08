@@ -110,10 +110,12 @@ class InvestigationOrchestrator:
             structured_intent = self._deterministic_intent_fallback(cleaned_query, history)
 
         # Step 4: Branch on intent type
-        if structured_intent.get("is_summary_request"):
+        # Priority order: specific event intent > generic activity intent
+        has_specific_event = bool(structured_intent.get("event_type")) or bool(structured_intent.get("color_summary"))
+        if structured_intent.get("is_summary_request") and not has_specific_event:
             return self._handle_video_summary(video_id, cleaned_query, used_mode)
 
-        if structured_intent.get("is_activity_request"):
+        if structured_intent.get("is_activity_request") and not has_specific_event:
             return self._handle_activity_analysis(video_id, cleaned_query, structured_intent, used_mode)
 
         return self._handle_filtered_investigation(video_id, cleaned_query, structured_intent, history, used_mode)
@@ -223,6 +225,17 @@ class InvestigationOrchestrator:
                 "result_type": "events",
             }
 
+        if re.search(r"\b(?:what\s+colou?rs?|what\s+colou?r\s+(?:clothes|clothing|dresses?|attire|garments?)|colou?r\s+of\s+(?:their|the)?\s*(?:clothes|clothing|dresses?|attire)|describe\s+(?:their|the)?\s*(?:clothing\s+)?colou?rs?|clothing\s+colou?rs?|what\s+were\s+(?:the\s+)?clothing\s+colou?rs?)\b", q):
+            return {
+                "intent": "investigate",
+                "is_supported": True,
+                "is_summary_request": False,
+                "is_activity_request": False,
+                "object_class": "person",
+                "color_summary": True,
+                "result_type": "tracks",
+            }
+
         if any(w in q for w in ["theft", "stealing", "takeaway", "burglary", "stolen", "taken", "take", "robbery"]):
             parsed = self.investigation_service.parser.parse_query(query)
             filters = parsed.get("interpreted_filters", {})
@@ -261,6 +274,23 @@ class InvestigationOrchestrator:
                 "category": "person",
                 "track_id": target_tid,
                 "color": target_col,
+                "result_type": "security_events",
+            }
+
+        if re.search(r"\b(?:crowd\s+dispers\w*|did\s+(?:the|a)?\s*crowd\s+disperse|dispers\w*\s+as\s+a\s+crowd|people\s+disperse\s+as\s+a\s+crowd|any\s+crowd\s+dispers\w*|dispersals?|crowd\s+disperse)\b", q):
+            parsed = self.investigation_service.parser.parse_query(query)
+            filters = parsed.get("interpreted_filters", {})
+            return {
+                "intent": "investigate",
+                "is_supported": True,
+                "is_summary_request": False,
+                "is_activity_request": False,
+                "object_class": None,
+                "start_time": filters.get("start_time"),
+                "end_time": filters.get("end_time"),
+                "min_confidence": filters.get("min_confidence"),
+                "event_type": "POTENTIAL_CROWD_DISPERSAL",
+                "category": "crowd",
                 "result_type": "security_events",
             }
 
@@ -747,6 +777,9 @@ class InvestigationOrchestrator:
             "filters": filters,
             "result_type": result_type,
             "count": total_count,
+            "canonical_entity_count": db_res.get("canonical_entity_count", total_count),
+            "canonical_entities": db_res.get("canonical_entities", []),
+            "raw_track_count": db_res.get("raw_track_count", total_count),
             "results": results[:20],  # Bound context payload
             "evidence": matched_evidence,
         }
@@ -863,6 +896,7 @@ class InvestigationOrchestrator:
         evidence = payload.get("evidence", [])
         filters = payload.get("filters", {})
         result_type = payload.get("result_type", "")
+        query = str(payload.get("query", "") or filters.get("query", ""))
 
         target_category = filters.get("category")
         target_type = filters.get("event_type")
@@ -916,6 +950,56 @@ class InvestigationOrchestrator:
             if filters.get("result_type") == "detection" or (filters.get("object_class") and not target_type):
                 return "Search executed successfully. No validated vehicle detections were found in this investigation."
             return "No reliable vehicle incident was detected in the available Sentinel data."
+
+        CROWD_EVENT_TYPES = [
+            "POTENTIAL_CROWD_DISPERSAL",
+            "POTENTIAL_CROWD_SURGE",
+            "HIGH_PEDESTRIAN_DENSITY",
+            "CROWD_DENSITY_INCREASE",
+            "POTENTIAL_UNUSUAL_CROWD_MOVEMENT",
+            "POTENTIAL_RESTRICTED_ZONE_CROWDING",
+        ]
+        is_crowd_query = (
+            target_category in ("crowd", "zone")
+            or (target_type and target_type in CROWD_EVENT_TYPES)
+            or bool(re.search(r"\b(?:crowd\s+dispers\w*|did\s+(?:the|a)?\s*crowd\s+disperse|dispers\w*\s+as\s+a\s+crowd|people\s+disperse\s+as\s+a\s+crowd|any\s+crowd\s+dispers\w*|dispersals?|crowd\s+disperse|crowd\s+surge|crowd\s+density)\b", query.lower()))
+        )
+
+        if is_crowd_query:
+            if count > 0 and results:
+                first = results[0]
+                ts = first.get("timestamp", 0.0)
+                desc = first.get("description", "")
+                ev_type = first.get("event_type", "CROWD_EVENT")
+                return (
+                    f"Sentinel identified {count} verified crowd event(s). "
+                    f"Earliest observation ({ev_type.replace('_', ' ')}) around {ts:.1f}s. {desc}"
+                )
+            if target_type == "POTENTIAL_CROWD_DISPERSAL" or "dispers" in query.lower():
+                return "No crowd dispersal event was detected in the video footage (0 crowd dispersal records)."
+            return "No reliable crowd incident was detected in the available Sentinel data."
+
+        # Person Clothing Color Summary response
+        if filters.get("color_summary") or re.search(r"\b(?:what\s+colou?rs?|colou?r\s+clothes|clothing\s+colou?rs?|what\s+were\s+(?:the\s+)?clothing\s+colou?rs?|what\s+colou?r\s+(?:dresses?|attire|garments?))\b", query.lower()):
+            if not results:
+                return "Search executed successfully. No verified person tracks were found in database records."
+
+            people_lines = []
+            for idx, r in enumerate(results, 1):
+                tid = r.get("track_id", f"PERSON-{idx:02d}")
+                col = r.get("color") or "unclassified"
+                conf = r.get("color_confidence")
+                conf_str = f" ({int(round(conf * 100))}% confidence)" if conf else ""
+                f_seen = r.get("first_seen", 0.0)
+                l_seen = r.get("last_seen", 0.0)
+                people_lines.append(f"• Person {idx} ({tid}): wearing {col} clothing{conf_str} [observed {f_seen:.1f}s – {l_seen:.1f}s]")
+
+            parts = [
+                f"Sentinel identified {len(results)} distinct physical individual(s) in the video:",
+                "\n".join(people_lines),
+                "(Note: Observational tracking only; zero personal identity attribution or biometric identification)."
+            ]
+            return "\n\n".join(parts)
 
         theft_matches = [r for r in results if r.get("event_type") in ("POTENTIAL_THEFT", "POTENTIAL_OBJECT_TAKEAWAY")]
         if filters.get("event_type") in ("POTENTIAL_THEFT", "POTENTIAL_OBJECT_TAKEAWAY") or theft_matches or filters.get("category") == "property":
@@ -1009,6 +1093,13 @@ class InvestigationOrchestrator:
             det_cnt = first.get("detection_count", 1)
             act_sum = first.get("activity_summary", "")
 
+            target_color = filters.get("color")
+            if target_color:
+                prefix = f"There is 1 person wearing {target_color} clothing (tracked as {trk_id}). " if count == 1 else f"There are {count} people wearing {target_color} clothing. "
+                if act_sum:
+                    return f"{prefix}{act_sum} (Observed from {f_seen:.1f}s to {l_seen:.1f}s across {det_cnt} detections. Note: Observational tracking only; zero personal identity attribution)."
+                return f"{prefix}Observed from {f_seen:.1f}s to {l_seen:.1f}s across {det_cnt} detections."
+
             if act_sum:
                 prefix = f"Track {trk_id} ({obj_cls}{color_desc}): " if trk_id not in act_sum else ""
                 return (
@@ -1022,6 +1113,34 @@ class InvestigationOrchestrator:
                 "(Note: Observational tracking only; zero personal identity attribution or biometric identification).",
             ]
             return " ".join(lines)
+
+        if result_type == "count":
+            c_cnt = payload.get("canonical_entity_count", count)
+            trk_cnt = payload.get("track_count", 0)
+            det_obs = payload.get("detection_observations", count)
+            target_col = filters.get("color")
+            target_cls = filters.get("object_class") or "person"
+            c_mode = payload.get("count_mode") or filters.get("count_mode")
+
+            if c_mode == "tracklets" or re.search(r"\btracks?\b", query.lower()):
+                plural_t = "tracks" if trk_cnt != 1 else "track"
+                return f"There are {trk_cnt} {plural_t} recorded in the video ({trk_cnt} tracks representing {c_cnt} distinct physical entities)."
+
+            if c_mode == "raw_detections":
+                plural_d = "detections" if det_obs != 1 else "detection"
+                return f"There were {det_obs} validated {target_cls} {plural_d} recorded across {trk_cnt} tracks."
+
+            if c_mode == "ambiguous_detected" or re.search(r"\b(?:were\s+detected|was\s+detected|how\s+many.*detected)\b", query.lower()):
+                plural_p = "people" if target_cls in ("person", "people", "persons") else ("entities" if c_cnt != 1 else "entity")
+                return f"{c_cnt} distinct physical {plural_p} were identified from {det_obs} validated {target_cls} detection observations."
+
+            if target_col:
+                plural = "people" if c_cnt != 1 else "person"
+                return f"There is {c_cnt} {plural} wearing {target_col} clothing in the video."
+            if target_cls in ("person", "people", "persons"):
+                plural = "people" if c_cnt != 1 else "person"
+                return f"There are {c_cnt} distinct {plural} in the video."
+            return f"Found {c_cnt} distinct {target_cls} entities in the video."
 
         if count == 0:
             target = filters.get("object_class") or filters.get("event_type") or "matching"

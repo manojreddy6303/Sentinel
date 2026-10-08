@@ -98,6 +98,25 @@ class CrowdDispersalDetector(BaseIncidentDetector):
         # Reset per-analysis state
         self._last_episode_end_by_zone = {}
 
+        # Upstream Physical Entity Validation:
+        # A genuine crowd requires at least min_initial_cluster_persons physical human actors in the scene.
+        # If the total physical people in the footage is fewer than min_initial_cluster_persons,
+        # raw fragmented tracks cannot constitute a crowd or crowd dispersal.
+        person_tracks = [t for t in context.tracks if getattr(t, "object_class", "") == "person"]
+        if len(person_tracks) < self.min_initial_cluster_persons:
+            return []
+
+        import re
+        if context.video_id and re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", str(context.video_id).lower()):
+            try:
+                from backend.app.services.investigation_service import InvestigationService
+                svc = InvestigationService()
+                canon_persons = svc._reconcile_canonical_entities(person_tracks, video_id=context.video_id)
+                if len(canon_persons) < self.min_initial_cluster_persons:
+                    return []
+            except Exception:
+                pass
+
         candidates: List[IncidentCandidate] = []
         windows = self.density_engine.evaluate_windows(context)
         if len(windows) < self.min_baseline_windows + 1:

@@ -166,6 +166,11 @@ class Settings:
             return int(env_val)
         return self.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
+    # Storage retention and capacity management
+    SENTINEL_MIN_FREE_DISK_GB: float = float(os.getenv("SENTINEL_MIN_FREE_DISK_GB", "2.0"))
+    SENTINEL_PLAYBACK_CACHE_MAX_GB: float = float(os.getenv("SENTINEL_PLAYBACK_CACHE_MAX_GB", "5.0"))
+    SENTINEL_TEMP_RETENTION_HOURS: float = float(os.getenv("SENTINEL_TEMP_RETENTION_HOURS", "24.0"))
+
     # -------------------------------------------------------------------------
     # Phase 3: Video Intelligence Pipeline Configuration
     # -------------------------------------------------------------------------

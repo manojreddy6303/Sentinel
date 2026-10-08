@@ -208,7 +208,7 @@ class TheftAndTakeawayDetector(BaseIncidentDetector):
                 pattern_type = "object_disappearance" if is_disappeared else "co_movement_takeaway"
                 duration_total = round(p_track.last_seen - interaction_start, 2)
                 takeaway_timestamp = round(o_track.last_seen if is_disappeared else interaction_end, 2)
-                event_start = max(0.0, round(max(interaction_start, takeaway_timestamp - min(interaction_duration, 5.0)), 2))
+                event_start = max(0.0, round(interaction_start, 2))
                 event_end = round(min(p_track.last_seen, max(event_start + 2.0, takeaway_timestamp + 3.0)), 2)
 
                 # Ground coordinates around the takeaway moment

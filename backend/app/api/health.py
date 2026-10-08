@@ -2,6 +2,7 @@
 Health check router for Sentinel API.
 """
 from fastapi import APIRouter
+from typing import Any, Dict
 try:
     from app.core.config import settings
 except ImportError:
@@ -86,5 +87,31 @@ def get_system_diagnostics():
             "version": ffprobe_ver,
         },
         "python_version": sys.version.split()[0],
+    }
+
+
+@router.get("/health/storage")
+def storage_health() -> Dict[str, Any]:
+    """
+    Storage capacity and integrity health diagnostic endpoint.
+    """
+    try:
+        from app.services.storage_service import storage_service
+    except ImportError:
+        from backend.app.services.storage_service import storage_service
+    total, used, free = storage_service.get_disk_usage()
+    integrity = storage_service.audit_storage_integrity()
+
+    free_gb = free / (1024 ** 3)
+    total_gb = total / (1024 ** 3)
+    is_healthy = free_gb >= settings.SENTINEL_MIN_FREE_DISK_GB
+
+    return {
+        "status": "ok" if is_healthy else "warning",
+        "disk_free_gb": round(free_gb, 2),
+        "disk_total_gb": round(total_gb, 2),
+        "min_reserve_gb": settings.SENTINEL_MIN_FREE_DISK_GB,
+        "playback_cache_max_gb": settings.SENTINEL_PLAYBACK_CACHE_MAX_GB,
+        "integrity": integrity,
     }
 

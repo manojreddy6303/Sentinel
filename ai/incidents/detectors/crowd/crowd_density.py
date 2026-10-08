@@ -59,6 +59,21 @@ class CrowdDensityDetector(BaseIncidentDetector):
 
     def analyze(self, context: IncidentContext) -> List[IncidentCandidate]:
         candidates: List[IncidentCandidate] = []
+        person_tracks = [t for t in context.tracks if getattr(t, "object_class", "") == "person"]
+        if len(person_tracks) < self.min_crowd_persons:
+            return candidates
+
+        import re
+        if context.video_id and re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", str(context.video_id).lower()):
+            try:
+                from backend.app.services.investigation_service import InvestigationService
+                svc = InvestigationService()
+                canon_persons = svc._reconcile_canonical_entities(person_tracks, video_id=context.video_id)
+                if len(canon_persons) < self.min_crowd_persons:
+                    return candidates
+            except Exception:
+                pass
+
         windows = self.density_engine.evaluate_windows(context)
         if not windows:
             return candidates

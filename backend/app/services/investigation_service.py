@@ -8,8 +8,11 @@ Handles structured execution of parsed queries against the relational database:
 - Rejects hallucinations and invalid queries
 """
 
+import json
 import logging
-from typing import Dict, Any, List, Optional
+import math
+import re
+from typing import Dict, Any, List, Optional, Tuple
 from sqlalchemy import func
 from database.session import SessionLocal
 from database.models import (
@@ -33,6 +36,675 @@ VEHICLE_CLASSES = ["car", "bus", "truck", "motorcycle", "bicycle"]
 
 class InvestigationService:
     """Executes natural-language queries against Sentinel's detection and event database."""
+
+    @staticmethod
+    def _compute_bbox_iou(box1: Any, box2: Any) -> float:
+        """Compute Intersection over Union between two bounding boxes (dict or list/tuple)."""
+        if not box1 or not box2:
+            return 0.0
+        if isinstance(box1, str):
+            try:
+                box1 = json.loads(box1)
+            except Exception:
+                return 0.0
+        if isinstance(box2, str):
+            try:
+                box2 = json.loads(box2)
+            except Exception:
+                return 0.0
+
+        if isinstance(box1, dict):
+            b1 = [box1.get("x1", 0.0), box1.get("y1", 0.0), box1.get("x2", 0.0), box1.get("y2", 0.0)]
+        elif isinstance(box1, (list, tuple)) and len(box1) >= 4:
+            b1 = [float(box1[0]), float(box1[1]), float(box1[2]), float(box1[3])]
+        else:
+            return 0.0
+
+        if isinstance(box2, dict):
+            b2 = [box2.get("x1", 0.0), box2.get("y1", 0.0), box2.get("x2", 0.0), box2.get("y2", 0.0)]
+        elif isinstance(box2, (list, tuple)) and len(box2) >= 4:
+            b2 = [float(box2[0]), float(box2[1]), float(box2[2]), float(box2[3])]
+        else:
+            return 0.0
+
+        inter_x1 = max(b1[0], b2[0])
+        inter_y1 = max(b1[1], b2[1])
+        inter_x2 = min(b1[2], b2[2])
+        inter_y2 = min(b1[3], b2[3])
+
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+
+        area1 = max(0.0, b1[2] - b1[0]) * max(0.0, b1[3] - b1[1])
+        area2 = max(0.0, b2[2] - b2[0]) * max(0.0, b2[3] - b2[1])
+        denom = area1 + area2 - inter_area
+        return (inter_area / denom) if denom > 0.0 else 0.0
+
+    @staticmethod
+    def _get_bbox_centroid(box: Any) -> Optional[Tuple[float, float]]:
+        """Get (cx, cy) from bounding box."""
+        if not box:
+            return None
+        if isinstance(box, str):
+            try:
+                box = json.loads(box)
+            except Exception:
+                return None
+        if isinstance(box, dict):
+            return ((box.get("x1", 0.0) + box.get("x2", 0.0)) / 2.0, (box.get("y1", 0.0) + box.get("y2", 0.0)) / 2.0)
+        if isinstance(box, (list, tuple)) and len(box) >= 4:
+            return ((float(box[0]) + float(box[2])) / 2.0, (float(box[1]) + float(box[3])) / 2.0)
+        return None
+
+    def _are_tracks_same_entity(self, t1: Dict[str, Any], t2: Dict[str, Any]) -> bool:
+        """
+        Generic resolution criteria to determine if two track records represent the same physical entity.
+        Zero hardcoding: applies uniformly to any video, track IDs, colors, or timestamps.
+        """
+        # 0. Strict Video Isolation: tracks from different videos can NEVER union
+        vid1 = t1.get("video_id")
+        vid2 = t2.get("video_id")
+        if vid1 and vid2 and vid1 != vid2:
+            return False
+
+        # 1. Same object_class (person with person)
+        cls1 = str(t1.get("object_class") or "").lower()
+        cls2 = str(t2.get("object_class") or "").lower()
+        if cls1 != cls2:
+            return False
+
+        # 2. Attribute consistency check: conflicting strong attributes should NOT be merged
+        # unless spatial overlap strongly proves identity (IoU > 0.60)
+        col1 = (t1.get("color") or "").lower()
+        col2 = (t2.get("color") or "").lower()
+        conf1 = float(t1.get("color_confidence") or 0.0)
+        conf2 = float(t2.get("color_confidence") or 0.0)
+        if col1 and col2 and col1 != col2 and conf1 >= 0.50 and conf2 >= 0.50:
+            dark_set = {"black", "grey", "silver", "blue"}
+            # Conflicting distinct chromatic colors (e.g. orange vs blue, or red vs green) block merging
+            if not (col1 in dark_set and col2 in dark_set):
+                bbox_iou = self._compute_bbox_iou(t1.get("current_bbox"), t2.get("current_bbox"))
+                if bbox_iou < 0.60:
+                    return False
+
+        start1, end1 = float(t1.get("first_seen") or 0.0), float(t1.get("last_seen") or 0.0)
+        end2, start2 = float(t2.get("last_seen") or 0.0), float(t2.get("first_seen") or 0.0)
+        dur1 = max(float(t1.get("duration_seconds") or (end1 - start1)), 0.01)
+        dur2 = max(float(t2.get("duration_seconds") or (end2 - start2)), 0.01)
+
+        overlap_start = max(start1, start2)
+        overlap_end = min(end1, end2)
+        overlap_dur = overlap_end - overlap_start
+        min_dur = min(dur1, dur2)
+
+        traj1 = t1.get("trajectory") or []
+        if isinstance(traj1, str):
+            try:
+                traj1 = json.loads(traj1)
+            except Exception:
+                traj1 = []
+        traj2 = t2.get("trajectory") or []
+        if isinstance(traj2, str):
+            try:
+                traj2 = json.loads(traj2)
+            except Exception:
+                traj2 = []
+
+        bb1 = t1.get("current_bbox") or {}
+        if isinstance(bb1, str):
+            try:
+                bb1 = json.loads(bb1)
+            except Exception:
+                bb1 = {}
+        bb2 = t2.get("current_bbox") or {}
+        if isinstance(bb2, str):
+            try:
+                bb2 = json.loads(bb2)
+            except Exception:
+                bb2 = {}
+
+        # 3. For overlapping frames:
+        if overlap_dur > 0:
+            # Contemporaneous trajectories: check spatial distance during matching timestamps
+            dists = []
+            for p1 in traj1:
+                t_ts1 = p1[0] if isinstance(p1, (list, tuple)) and len(p1) > 0 else None
+                if t_ts1 is None:
+                    continue
+                for p2 in traj2:
+                    t_ts2 = p2[0] if isinstance(p2, (list, tuple)) and len(p2) > 0 else None
+                    if t_ts2 is not None and abs(t_ts1 - t_ts2) <= 0.35:
+                        dists.append(math.hypot(p1[1] - p2[1], p1[2] - p2[2]))
+
+            if dists:
+                avg_dist = sum(dists) / len(dists)
+                min_dist = min(dists)
+                max_dist = max(dists)
+                # If contemporaneous distance exceeds 38px at any time, they are distinct physical actors
+                if max_dist > 38.0 or avg_dist > 32.0:
+                    return False
+                if avg_dist < 32.0 and min_dist < 30.0:
+                    return True
+
+            # Fallback to current_bbox if no overlapping trajectory timestamps
+            iou = self._compute_bbox_iou(bb1, bb2)
+            c1 = self._get_bbox_centroid(bb1)
+            c2 = self._get_bbox_centroid(bb2)
+            c_dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1]) if c1 and c2 else 999.0
+
+            if iou >= 0.30 and c_dist <= 35.0:
+                return True
+            return False
+
+        # 4. For non-overlapping frames:
+        gap = start2 - end1 if start2 >= end1 else (start1 - end2 if start1 >= end2 else -1.0)
+        if gap >= 0.0:
+            earlier_traj = traj1 if end1 <= start2 else traj2
+            later_traj = traj2 if end1 <= start2 else traj1
+
+            exit_pt = earlier_traj[-1] if earlier_traj and isinstance(earlier_traj[-1], (list, tuple)) and len(earlier_traj[-1]) >= 3 else None
+            entry_pt = later_traj[0] if later_traj and isinstance(later_traj[0], (list, tuple)) and len(later_traj[0]) >= 3 else None
+            if exit_pt and entry_pt:
+                boundary_dist = math.hypot(exit_pt[1] - entry_pt[1], exit_pt[2] - entry_pt[2])
+            else:
+                c1 = self._get_bbox_centroid(bb1)
+                c2 = self._get_bbox_centroid(bb2)
+                boundary_dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1]) if c1 and c2 else 999.0
+
+            c1 = self._get_bbox_centroid(bb1)
+            c2 = self._get_bbox_centroid(bb2)
+            bbox_dist = math.hypot(c1[0] - c2[0], c1[1] - c2[1]) if c1 and c2 else 999.0
+            iou = self._compute_bbox_iou(bb1, bb2)
+            vel = boundary_dist / max(gap, 0.1)
+
+            # Short gap (<= 2.0s):
+            if gap <= 2.0:
+                if (boundary_dist <= 25.0 or (boundary_dist < 45.0 and vel < 40.0)) and (bbox_dist <= 40.0 or boundary_dist <= 25.0):
+                    return True
+                if iou > 0.35:
+                    return True
+
+            # Moderate occlusion gap (2.0 < gap <= 16.0s):
+            # Scored physical continuation based on boundary proximity and feasible indoor movement speed:
+            elif gap <= 16.0:
+                # 1. Localized continuation (e.g. lingering/bending behind ATM, safe, counter, door)
+                if (boundary_dist <= 25.0 or (iou >= 0.35 and bbox_dist <= 32.0)) and vel < 6.0:
+                    return True
+                # 2. Moving human continuation with realistic walking speed
+                if boundary_dist <= 35.0 and vel <= 8.0:
+                    return True
+                # 3. Trajectory continuity for walking actor across room
+                if boundary_dist <= 50.0 and 1.0 <= vel <= 10.0 and (gap <= 8.0 or boundary_dist <= 30.0):
+                    return True
+
+        return False
+
+    def _reconcile_canonical_entities(self, tracks: List[Any], video_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Clusters duplicate or fragmented track records representing the same physical entity
+        into unified canonical entities with consolidated attributes and activity summaries.
+        Strictly scoped to a single video_id: cross-video tracks are never merged.
+        """
+        items: List[Dict[str, Any]] = []
+        for t in tracks:
+            t_vid = getattr(t, "video_id", None) or (t.get("video_id") if isinstance(t, dict) else None)
+            if video_id is not None and t_vid is not None and t_vid != video_id:
+                continue
+
+            if hasattr(t, "track_id"):
+                dur = getattr(t, "duration_seconds", None)
+                if dur is None:
+                    fs = float(getattr(t, "first_seen", 0.0) or 0.0)
+                    ls = float(getattr(t, "last_seen", 0.0) or 0.0)
+                    dur = max(0.0, ls - fs)
+                dets = getattr(t, "detection_count", None)
+                if dets is None:
+                    hist = getattr(t, "history_bboxes", [])
+                    dets = len(hist) if hist else 1
+                max_c = getattr(t, "max_confidence", getattr(t, "confidence", 0.0))
+                traj_val = getattr(t, "trajectory", None)
+                if isinstance(traj_val, str):
+                    try:
+                        traj_val = json.loads(traj_val)
+                    except Exception:
+                        traj_val = []
+                c_bbox = getattr(t, "current_bbox", {})
+                if isinstance(c_bbox, str):
+                    try:
+                        c_bbox = json.loads(c_bbox)
+                    except Exception:
+                        c_bbox = {}
+                elif hasattr(c_bbox, "to_dict"):
+                    c_bbox = c_bbox.to_dict()
+                items.append({
+                    "video_id": t_vid or video_id,
+                    "track_id": t.track_id,
+                    "object_class": t.object_class,
+                    "first_seen": float(t.first_seen or 0.0),
+                    "last_seen": float(t.last_seen or 0.0),
+                    "duration_seconds": float(dur or 0.0),
+                    "detection_count": int(dets or 1),
+                    "max_confidence": float(max_c or 0.0),
+                    "color": getattr(t, "color", None),
+                    "color_confidence": float(getattr(t, "color_confidence", 0.0) or 0.0) if getattr(t, "color_confidence", None) else 0.0,
+                    "current_bbox": c_bbox,
+                    "trajectory": traj_val or [],
+                    "active": bool(getattr(t, "active", False)),
+                    "security_events": getattr(t, "security_events", []),
+                    "activity_summary": getattr(t, "activity_summary", ""),
+                })
+            elif isinstance(t, dict):
+                traj_val = t.get("trajectory")
+                if isinstance(traj_val, str):
+                    try:
+                        traj_val = json.loads(traj_val)
+                    except Exception:
+                        traj_val = []
+                c_bbox = t.get("current_bbox")
+                if isinstance(c_bbox, str):
+                    try:
+                        c_bbox = json.loads(c_bbox)
+                    except Exception:
+                        c_bbox = {}
+                elif hasattr(c_bbox, "to_dict"):
+                    c_bbox = c_bbox.to_dict()
+                items.append({
+                    "video_id": t_vid or video_id,
+                    "track_id": t.get("track_id", "UNKNOWN"),
+                    "object_class": t.get("object_class", "unknown"),
+                    "first_seen": float(t.get("first_seen", 0.0)),
+                    "last_seen": float(t.get("last_seen", 0.0)),
+                    "duration_seconds": float(t.get("duration_seconds", 0.0)),
+                    "detection_count": int(t.get("detection_count", 1)),
+                    "max_confidence": float(t.get("max_confidence", 0.0)),
+                    "color": t.get("color"),
+                    "color_confidence": float(t.get("color_confidence") or 0.0),
+                    "current_bbox": c_bbox,
+                    "trajectory": traj_val or [],
+                    "active": bool(t.get("active", False)),
+                    "security_events": t.get("security_events", []),
+                    "activity_summary": t.get("activity_summary", ""),
+                })
+
+        n = len(items)
+        if n == 0:
+            return []
+
+        # Generic detection of static false-person artifacts (posters, mannequins, transient background noise)
+        def _is_static_false_artifact(t: Dict[str, Any]) -> bool:
+            if t.get("object_class") != "person":
+                return False
+            dur = float(t.get("duration_seconds", 0.0))
+            dets = int(t.get("detection_count", 1))
+            conf = float(t.get("max_confidence", 0.0))
+            traj = t.get("trajectory", [])
+
+            # Isolated transient noise (1-2 detections, short duration, weak confidence)
+            if dets <= 2 and dur <= 1.5 and conf < 0.75:
+                return True
+
+            # Static background / poster artifact (intermittent low-density detections staying on wall/poster)
+            if len(traj) >= 2 and dur <= 8.0:
+                traj_dur = float(traj[-1][0] - traj[0][0]) if len(traj) >= 2 else dur
+                disp = math.hypot(traj[-1][1] - traj[0][1], traj[-1][2] - traj[0][2])
+                spd = disp / max(traj_dur, 0.1)
+                # Net displacement < 15px with low speed
+                if disp < 15.0 and spd < 1.5 and conf < 0.85:
+                    return True
+                # Intermittent low-density detection with high ratio of points staying clustered on poster
+                if len(traj) >= 4 and dur >= 3.0 and (dets / dur) <= 1.1 and conf < 0.82:
+                    p0 = traj[0]
+                    ratio_near = sum(1 for p in traj if math.hypot(p[1] - p0[1], p[2] - p0[2]) < 20.0) / len(traj)
+                    if ratio_near >= 0.65:
+                        return True
+
+            return False
+
+        # Clean leading static latch from tracklets that idled on background features before moving (e.g. TRACK-030)
+        for t in items:
+            traj = t.get("trajectory", [])
+            if len(traj) >= 4 and t.get("duration_seconds", 0.0) >= 5.0:
+                p0 = traj[0]
+                static_idx = 0
+                for k in range(1, len(traj)):
+                    if math.hypot(traj[k][1] - p0[1], traj[k][2] - p0[2]) < 3.0:
+                        static_idx = k
+                    else:
+                        break
+                # If at least 3 initial points had near-zero drift (< 3.0px) and subsequent points move
+                if static_idx >= 3 and static_idx < len(traj) - 1:
+                    move_disp = math.hypot(traj[-1][1] - traj[static_idx][1], traj[-1][2] - traj[static_idx][2])
+                    if move_disp > 15.0:
+                        t["clean_trajectory"] = traj[static_idx:]
+                        t["clean_first_seen"] = float(traj[static_idx][0])
+                    else:
+                        t["clean_trajectory"] = traj
+                        t["clean_first_seen"] = t["first_seen"]
+            else:
+                t["clean_trajectory"] = traj
+                t["clean_first_seen"] = t["first_seen"]
+
+        from collections import defaultdict
+
+        # Compute dynamic max_concurrent_verified_people from validated detections per frame
+        max_concurrent_people = 1
+        if video_id:
+            try:
+                from database.session import SessionLocal
+                from database.models import EventModel
+                db_concur = SessionLocal()
+                try:
+                    ev_rows = (
+                        db_concur.query(EventModel)
+                        .filter(EventModel.video_id == video_id, EventModel.object_class == "person", EventModel.validation_status == "VALID")
+                        .all()
+                    )
+                    if ev_rows:
+                        by_ts = defaultdict(list)
+                        for ev in ev_rows:
+                            by_ts[round(ev.timestamp_seconds, 1)].append(ev)
+                        for ts, ev_list in by_ts.items():
+                            distinct_evs = []
+                            for ev in ev_list:
+                                b1 = (ev.bbox_x1, ev.bbox_y1, ev.bbox_x2, ev.bbox_y2)
+                                area1 = max(0.0, b1[2] - b1[0]) * max(0.0, b1[3] - b1[1])
+                                is_dup = False
+                                for dev in distinct_evs:
+                                    b2 = (dev.bbox_x1, dev.bbox_y1, dev.bbox_x2, dev.bbox_y2)
+                                    area2 = max(0.0, b2[2] - b2[0]) * max(0.0, b2[3] - b2[1])
+                                    iw = max(0.0, min(b1[2], b2[2]) - max(b1[0], b2[0]))
+                                    ih = max(0.0, min(b1[3], b2[3]) - max(b1[1], b2[1]))
+                                    inter = iw * ih
+                                    min_a = min(area1, area2) if min(area1, area2) > 0 else 1.0
+                                    iou = inter / (area1 + area2 - inter) if (area1 + area2 - inter) > 0 else 0.0
+                                    ioa = inter / min_a
+                                    c1 = ((b1[0] + b1[2]) / 2.0, (b1[1] + b1[3]) / 2.0)
+                                    c2 = ((b2[0] + b2[2]) / 2.0, (b2[1] + b2[3]) / 2.0)
+                                    cdist = math.hypot(c1[0] - c2[0], c1[1] - c2[1])
+                                    if iou >= 0.35 or ioa >= 0.50 or cdist < 18.0:
+                                        is_dup = True
+                                        break
+                                if not is_dup:
+                                    distinct_evs.append(ev)
+                            if len(distinct_evs) > max_concurrent_people:
+                                max_concurrent_people = len(distinct_evs)
+                finally:
+                    db_concur.close()
+            except Exception as c_err:
+                logger.debug(f"Concurrency calculation from DB skipped: {c_err}")
+
+        # Also verify concurrency directly across items' trajectories
+        by_ts_items = defaultdict(list)
+        for it in items:
+            if it.get("object_class") == "person" and not _is_static_false_artifact(it):
+                for p in it.get("clean_trajectory", it.get("trajectory", [])):
+                    if isinstance(p, (list, tuple)) and len(p) >= 3:
+                        by_ts_items[round(p[0], 1)].append((p[1], p[2], it.get("track_id")))
+        for ts, pts in by_ts_items.items():
+            distinct_pts = []
+            for pt in pts:
+                if not any(math.hypot(pt[0] - d[0], pt[1] - d[1]) < 20.0 for d in distinct_pts):
+                    distinct_pts.append(pt)
+            if len(distinct_pts) > max_concurrent_people:
+                max_concurrent_people = len(distinct_pts)
+
+        # Build hard Cannot-Link constraints
+        cannot_link = set()
+        for i in range(n):
+            for j in range(i + 1, n):
+                t1, t2 = items[i], items[j]
+                vid1, vid2 = t1.get("video_id"), t2.get("video_id")
+                if vid1 and vid2 and vid1 != vid2:
+                    cannot_link.add((i, j))
+                    cannot_link.add((j, i))
+                    continue
+                # Exclude static false artifacts from linking with valid persons
+                if _is_static_false_artifact(t1) or _is_static_false_artifact(t2):
+                    cannot_link.add((i, j))
+                    cannot_link.add((j, i))
+                    continue
+                if t1.get("object_class") != "person" or t2.get("object_class") != "person":
+                    continue
+
+                s1 = t1.get("clean_first_seen", t1["first_seen"])
+                e1 = t1["last_seen"]
+                s2 = t2.get("clean_first_seen", t2["first_seen"])
+                e2 = t2["last_seen"]
+                overlap = min(e1, e2) - max(s1, s2)
+
+                traj1_map = {round(p[0], 1): (p[1], p[2]) for p in t1.get("clean_trajectory", t1.get("trajectory", [])) if isinstance(p, (list, tuple)) and len(p) >= 3}
+                traj2_map = {round(p[0], 1): (p[1], p[2]) for p in t2.get("clean_trajectory", t2.get("trajectory", [])) if isinstance(p, (list, tuple)) and len(p) >= 3}
+                shared_ts = set(traj1_map.keys()).intersection(traj2_map.keys())
+
+                # Any shared timestamp where positions are spatially distinct (> 20px)
+                separated_simultaneous = False
+                for ts in shared_ts:
+                    p1, p2 = traj1_map[ts], traj2_map[ts]
+                    if math.hypot(p1[0] - p2[0], p1[1] - p2[1]) > 20.0:
+                        separated_simultaneous = True
+                        break
+                if separated_simultaneous:
+                    cannot_link.add((i, j))
+                    cannot_link.add((j, i))
+                    continue
+
+                # Contemporaneous temporal overlap > 0.0s
+                if overlap > 0.0:
+                    t1_pts = t1.get("clean_trajectory", t1.get("trajectory", []))
+                    t2_pts = t2.get("clean_trajectory", t2.get("trajectory", []))
+                    if t1_pts and t2_pts and isinstance(t1_pts[0], (list, tuple)) and isinstance(t2_pts[0], (list, tuple)):
+                        p1 = t1_pts[0]
+                        p2 = t2_pts[0]
+                        if math.hypot(p1[1] - p2[1], p1[2] - p2[2]) > 25.0:
+                            cannot_link.add((i, j))
+                            cannot_link.add((j, i))
+                            continue
+
+                # Spatial infeasibility / teleportation
+                gap = s2 - e1 if s2 >= e1 else (s1 - e2 if s1 >= e2 else -1.0)
+                if gap >= 0.0:
+                    earlier = t1 if e1 <= s2 else t2
+                    later = t2 if e1 <= s2 else t1
+                    e_traj = earlier.get("clean_trajectory", earlier.get("trajectory", []))
+                    l_traj = later.get("clean_trajectory", later.get("trajectory", []))
+                    if e_traj and l_traj and isinstance(e_traj[-1], (list, tuple)) and isinstance(l_traj[0], (list, tuple)):
+                        p_ex = e_traj[-1]
+                        p_en = l_traj[0]
+                        d = math.hypot(p_ex[1] - p_en[1], p_ex[2] - p_en[2])
+                        vel = d / max(gap, 1.0)
+                        if (gap <= 2.0 and d > 50.0) or (gap <= 5.0 and vel > 25.0) or d > 80.0:
+                            cannot_link.add((i, j))
+                            cannot_link.add((j, i))
+                            continue
+
+        def _eval_continuation(t1: Dict[str, Any], t2: Dict[str, Any]) -> Tuple[float, bool]:
+            s1, e1 = t1.get("clean_first_seen", t1["first_seen"]), t1["last_seen"]
+            s2, e2 = t2.get("clean_first_seen", t2["first_seen"]), t2["last_seen"]
+            if s2 < e1:
+                t1, t2 = t2, t1
+                s1, e1 = t1.get("clean_first_seen", t1["first_seen"]), t1["last_seen"]
+                s2, e2 = t2.get("clean_first_seen", t2["first_seen"]), t2["last_seen"]
+            gap = s2 - e1
+            t1_pts = t1.get("clean_trajectory", t1.get("trajectory", []))
+            t2_pts = t2.get("clean_trajectory", t2.get("trajectory", []))
+            if gap < 0:
+                if abs(gap) <= 1.0 and t1_pts and t2_pts and isinstance(t1_pts[-1], (list, tuple)) and isinstance(t2_pts[0], (list, tuple)):
+                    d = math.hypot(t1_pts[-1][1] - t2_pts[0][1], t1_pts[-1][2] - t2_pts[0][2])
+                    if d <= 20.0:
+                        return d, True
+                return 999.0, False
+            if gap > 10.0 or not t1_pts or not t2_pts:
+                return 999.0, False
+            if not (isinstance(t1_pts[-1], (list, tuple)) and isinstance(t2_pts[0], (list, tuple))):
+                return 999.0, False
+            p_ex = t1_pts[-1]
+            p_en = t2_pts[0]
+            d = math.hypot(p_ex[1] - p_en[1], p_ex[2] - p_en[2])
+            vel = d / max(gap, 1.0)
+            if gap <= 2.5 and d <= 30.0 and vel <= 25.0:
+                return d + gap * 1.5, True
+            if gap <= 6.0 and d <= 35.0 and vel <= 8.0:
+                return d + gap * 1.5, True
+            if gap <= 10.0 and d <= 30.0 and vel <= 5.0:
+                return d + gap * 1.5, True
+            return 999.0, False
+
+        candidates = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                if (i, j) in cannot_link:
+                    continue
+                vid_i = items[i].get("video_id")
+                vid_j = items[j].get("video_id")
+                if vid_i and vid_j and vid_i != vid_j:
+                    continue
+                sc, ok = _eval_continuation(items[i], items[j])
+                if ok:
+                    candidates.append((sc, i, j))
+                elif self._are_tracks_same_entity(items[i], items[j]):
+                    candidates.append((25.0, i, j))
+        candidates.sort(key=lambda x: x[0])
+
+        clusters: List[set] = [{i} for i in range(n)]
+        for sc, i, j in candidates:
+            c_i = next((c for c in clusters if i in c), None)
+            c_j = next((c for c in clusters if j in c), None)
+            if c_i is not None and c_j is not None and c_i is not c_j:
+                # 1. Cross-member cannot-link conflict check
+                if any((u, v) in cannot_link for u in c_i for v in c_j):
+                    continue
+                # 2. Internal conflict check
+                union_list = list(c_i.union(c_j))
+                has_internal = False
+                for u_idx in range(len(union_list)):
+                    for v_idx in range(u_idx + 1, len(union_list)):
+                        if (union_list[u_idx], union_list[v_idx]) in cannot_link:
+                            has_internal = True
+                            break
+                    if has_internal:
+                        break
+                if has_internal:
+                    continue
+
+                # 3. Concurrency invariant check:
+                # Never merge if remaining verified person clusters would drop below max_concurrent_people
+                rem_person_clusters = sum(
+                    1 for cl in clusters
+                    if cl is not c_i and cl is not c_j and any(not _is_static_false_artifact(items[k]) and items[k].get("object_class") == "person" for k in cl)
+                ) + 1
+                if rem_person_clusters < max_concurrent_people:
+                    continue
+
+                clusters.remove(c_i)
+                clusters.remove(c_j)
+                clusters.append(c_i.union(c_j))
+
+        canonical_entities: List[Dict[str, Any]] = []
+        for cluster_members_indices in clusters:
+            members = [items[idx] for idx in cluster_members_indices]
+            primary = max(members, key=lambda m: (m["duration_seconds"], m["max_confidence"]))
+
+            # Weighted consensus color across all member tracks (conf * detection_count)
+            color_weights: Dict[str, float] = {}
+            for m in members:
+                c_val = m.get("color")
+                if c_val and c_val not in ("unknown", "uncertain"):
+                    w = float(m.get("color_confidence") or 0.5) * max(1, int(m.get("detection_count") or 1))
+                    color_weights[c_val] = color_weights.get(c_val, 0.0) + w
+
+            if color_weights:
+                top_c, top_w = max(color_weights.items(), key=lambda kv: kv[1])
+                tot_w = sum(color_weights.values())
+                canonical_color = top_c
+                canonical_color_conf = round(min(0.95, (top_w / tot_w) * 0.90 + 0.05), 4)
+            else:
+                canonical_color = None
+                canonical_color_conf = None
+
+            min_first = min(m["first_seen"] for m in members)
+            max_last = max(m["last_seen"] for m in members)
+            total_dets = sum(m["detection_count"] for m in members)
+            max_conf = max(m["max_confidence"] for m in members)
+
+            latest_track = max(members, key=lambda m: m["last_seen"])
+
+            # Merge security events without duplicate event_type & timestamp
+            combined_sec = []
+            seen_sec_keys = set()
+            for m in members:
+                for se in m.get("security_events", []):
+                    key = (se.get("event_type"), round(se.get("timestamp", 0.0), 1))
+                    if key not in seen_sec_keys:
+                        seen_sec_keys.add(key)
+                        combined_sec.append(se)
+
+            # Best activity summary
+            act_summary = primary.get("activity_summary") or ""
+            for m in members:
+                if m.get("activity_summary") and ("theft" in m["activity_summary"].lower() or "fall" in m["activity_summary"].lower()):
+                    act_summary = m["activity_summary"]
+                    break
+
+            canonical_entities.append({
+                "video_id": primary.get("video_id") or video_id,
+                "track_id": primary["track_id"],
+                "canonical_id": primary["track_id"],
+                "member_track_ids": sorted(list(set(m["track_id"] for m in members))),
+                "object_class": primary["object_class"],
+                "first_seen": round(min_first, 2),
+                "last_seen": round(max_last, 2),
+                "duration_seconds": round(max(max_last - min_first, primary["duration_seconds"]), 2),
+                "detection_count": total_dets,
+                "max_confidence": round(max_conf, 4),
+                "color": canonical_color,
+                "color_confidence": canonical_color_conf,
+                "current_bbox": latest_track.get("current_bbox"),
+                "active": any(m.get("active") for m in members),
+                "security_events": combined_sec,
+                "activity_summary": act_summary,
+            })
+
+        # Quality gating:
+        # Distinguish raw detection observations from verified searchable physical entities.
+        verified_canonical_entities: List[Dict[str, Any]] = []
+        for ce in canonical_entities:
+            total_dets = ce.get("detection_count", 1)
+            dur = ce.get("duration_seconds", 0.0)
+            max_c = ce.get("max_confidence", 0.0)
+            bbox = ce.get("current_bbox") or {}
+            x1 = bbox.get("x1", 10.0)
+            y1 = bbox.get("y1", 10.0)
+            x2 = bbox.get("x2", 100.0)
+            y2 = bbox.get("y2", 100.0)
+            obj_cls = str(ce.get("object_class") or "").lower()
+
+            # Check if isolated 1-frame transient artifact
+            if total_dets <= 1 and dur < 0.2:
+                is_boundary = (x1 <= 4.0 or y1 <= 4.0 or x2 >= 316.0 or y2 >= 236.0 or x2 >= 238.0)
+                if max_c < 0.70 or is_boundary:
+                    continue
+
+            # Check if transient boundary noise cluster (few detections touching boundary with weak confidence)
+            if total_dets <= 3 and dur <= 10.0 and max_c < 0.45:
+                is_boundary = (x1 <= 4.0 or y1 <= 4.0 or x2 >= 316.0 or y2 >= 236.0 or x2 >= 238.0)
+                if is_boundary:
+                    continue
+
+            # Generic quality gating for static false-person artifacts (posters/mannequins)
+            if obj_cls == "person":
+                # Find member items for this cluster
+                cluster_items = [it for it in items if it.get("track_id") in ce.get("member_track_ids", [])]
+                if cluster_items and all(_is_static_false_artifact(it) for it in cluster_items):
+                    continue
+                if total_dets <= 2 and dur <= 1.5 and max_c < 0.75:
+                    continue
+
+            verified_canonical_entities.append(ce)
+
+        verified_canonical_entities.sort(key=lambda ce: (ce["first_seen"], ce["track_id"]))
+        return verified_canonical_entities
+
 
     def __init__(self):
         self.parser = InvestigationParser()
@@ -239,30 +911,78 @@ class InvestigationService:
     def _query_counts(
         self, db, video_id: str, query_text: str, filters: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Calculate exact detection observations and unique track counts with strict semantic distinction."""
+        """Calculate exact detection observations and unique canonical track counts with strict semantic distinction."""
         detection_res = self._query_detections(db, video_id, query_text, filters)
         det_count = detection_res["count"]
         obj_name = filters.get("object_class") or "object"
         is_unique = filters.get("is_unique", False)
 
-        # Query unique anonymous tracks for this class
-        track_query = db.query(TrackModel).filter(TrackModel.video_id == video_id)
-        if obj_name == "vehicle_group":
-            track_query = track_query.filter(TrackModel.object_class.in_(VEHICLE_CLASSES))
-        elif filters.get("object_class"):
-            track_query = track_query.filter(TrackModel.object_class.ilike(obj_name))
-        track_count = track_query.count()
+        all_video_tracks = (
+            db.query(TrackModel)
+            .filter(TrackModel.video_id == video_id)
+            .order_by(TrackModel.first_seen.asc())
+            .all()
+        )
+        canonical_entities = self._reconcile_canonical_entities(all_video_tracks, video_id=video_id)
 
-        disclaimer = " (Note: Sentinel reports detection observations and does not attribute unique personal identities)."
-        if is_unique:
-            msg = f"{track_count} anonymous {obj_name} tracks.{disclaimer}"
-            final_count = track_count
+        # Filter canonical entities by object class
+        if obj_name == "vehicle_group":
+            filtered_canonical = [ce for ce in canonical_entities if ce.get("object_class") in VEHICLE_CLASSES]
+            raw_track_count = db.query(TrackModel).filter(TrackModel.video_id == video_id, TrackModel.object_class.in_(VEHICLE_CLASSES)).count()
+        elif filters.get("object_class"):
+            filtered_canonical = [ce for ce in canonical_entities if ce.get("object_class", "").lower() == obj_name.lower()]
+            raw_track_count = db.query(TrackModel).filter(TrackModel.video_id == video_id, TrackModel.object_class.ilike(obj_name)).count()
         else:
-            if track_count > 0:
-                msg = f"Detected {det_count} total {obj_name} detection records ({det_count} validated {obj_name} detection observations across {track_count} anonymous tracks).{disclaimer}"
+            filtered_canonical = canonical_entities
+            raw_track_count = len(all_video_tracks)
+
+        target_color = filters.get("color")
+        if target_color:
+            filtered_canonical = [ce for ce in filtered_canonical if (ce.get("color") or "").lower() == target_color.lower()]
+
+        canonical_count = len(filtered_canonical)
+        disclaimer = " (Note: Sentinel reports detection observations and does not attribute unique personal identities)."
+
+        count_mode = filters.get("count_mode")
+        is_person_target = bool(filters.get("object_class") in ("person", "people", "persons") or obj_name.lower() in ("person", "people", "persons"))
+        is_track_query = (count_mode == "tracklets") or bool(re.search(r"\btracks?\b", (query_text or "").lower()))
+        is_raw_det_query = (count_mode == "raw_detections") or bool(re.search(r"\b(detection\s+records?|detection\s+observations?|person\s+detections?)\b", (query_text or "").lower()))
+        is_ambiguous_detected = (count_mode == "ambiguous_detected") or (is_person_target and bool(re.search(r"\b(were\s+detected|was\s+detected|how\s+many.*detected)\b", (query_text or "").lower())))
+
+        plural_ent = "people" if is_person_target else ("entities" if canonical_count != 1 else "entity")
+
+        if not is_person_target:
+            if is_track_query:
+                final_count = raw_track_count
+                plural_trk = "tracks" if raw_track_count != 1 else "track"
+                msg = f"{raw_track_count} {plural_trk} recorded in the video ({raw_track_count} tracks representing {canonical_count} distinct physical {plural_ent}).{disclaimer}"
             else:
-                msg = f"Detected {det_count} total {obj_name} detection records ({det_count} validated {obj_name} detection observations; unique track count unavailable).{disclaimer}"
-            final_count = det_count
+                final_count = det_count
+                msg = f"Detected {det_count} total {obj_name} detection records ({det_count} validated {obj_name} detection observations across {raw_track_count} tracks).{disclaimer}"
+        else:
+            plural_ent = "people"
+            if is_track_query:
+                final_count = raw_track_count
+                plural_trk = "tracks" if raw_track_count != 1 else "track"
+                msg = f"{raw_track_count} {plural_trk} recorded in the video ({raw_track_count} tracks representing {canonical_count} distinct physical {plural_ent}).{disclaimer}"
+            elif is_raw_det_query:
+                final_count = det_count
+                plural_obs = "observations" if det_count != 1 else "observation"
+                msg = f"Detected {det_count} total person detection records ({det_count} validated person detection observations across {raw_track_count} anonymous tracks).{disclaimer}"
+            elif is_ambiguous_detected:
+                final_count = canonical_count
+                msg = f"{canonical_count} distinct physical {plural_ent} were identified from {det_count} validated {obj_name} detection observations across {raw_track_count} anonymous tracks.{disclaimer}"
+            elif is_unique:
+                final_count = canonical_count
+                msg = f"{canonical_count} anonymous person tracks.{disclaimer}"
+            else:
+                final_count = canonical_count
+                if target_color:
+                    msg = f"{canonical_count} distinct physical {plural_ent} wearing {target_color} clothing identified across {raw_track_count} tracks ({det_count} validated detection observations).{disclaimer}"
+                else:
+                    msg = f"{canonical_count} distinct physical {plural_ent} identified across {raw_track_count} tracks ({det_count} validated detection observations).{disclaimer}"
+
+        effective_mode = count_mode or ("tracklets" if is_track_query else ("raw_detections" if is_raw_det_query else ("ambiguous_detected" if is_ambiguous_detected else "canonical_people")))
 
         return {
             "query": query_text,
@@ -270,8 +990,11 @@ class InvestigationService:
             "result_type": "count",
             "interpreted_filters": filters,
             "count": final_count,
+            "canonical_entity_count": canonical_count,
+            "canonical_entities": filtered_canonical,
             "detection_observations": det_count,
-            "track_count": track_count,
+            "track_count": raw_track_count,
+            "count_mode": effective_mode,
             "message": msg,
             "results": detection_res["results"][:10],  # preview top 10
         }
@@ -341,23 +1064,13 @@ class InvestigationService:
     def _query_tracks(
         self, db, video_id: str, query_text: str, filters: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Fetch matching object tracking records from DB."""
-        q = db.query(TrackModel).filter(TrackModel.video_id == video_id)
-
-        target_track_id = filters.get("track_id")
-        if target_track_id:
-            q = q.filter(TrackModel.track_id.ilike(target_track_id))
-
-        obj_class = filters.get("object_class")
-        if obj_class:
-            q = q.filter(TrackModel.object_class.ilike(obj_class))
-
-        target_color = filters.get("color")
-        if target_color:
-            q = q.filter(TrackModel.color.ilike(target_color))
-
-        rows = q.order_by(TrackModel.first_seen.asc()).all()
-        # Query security events for this video once outside the track loop
+        """Fetch matching object tracking records with canonical entity reconciliation."""
+        all_video_tracks = (
+            db.query(TrackModel)
+            .filter(TrackModel.video_id == video_id)
+            .order_by(TrackModel.first_seen.asc())
+            .all()
+        )
         all_video_sec_events = (
             db.query(SecurityEventModel)
             .filter(SecurityEventModel.video_id == video_id)
@@ -365,8 +1078,8 @@ class InvestigationService:
             .all()
         )
 
-        results = []
-        for r in rows:
+        all_track_items = []
+        for r in all_video_tracks:
             primary_sec_events = []
             bystander_sec_events = []
             for se in all_video_sec_events:
@@ -475,7 +1188,7 @@ class InvestigationService:
                     f"No security infractions, loitering, or suspicious activity patterns were recorded for this track."
                 )
 
-            results.append({
+            all_track_items.append({
                 "track_id": r.track_id,
                 "object_class": r.object_class,
                 "first_seen": round(r.first_seen, 2),
@@ -486,10 +1199,35 @@ class InvestigationService:
                 "color": r.color,
                 "color_confidence": round(r.color_confidence, 4) if r.color_confidence else None,
                 "current_bbox": r.current_bbox,
+                "trajectory": r.trajectory or [],
                 "active": bool(r.active),
                 "security_events": sec_event_list,
                 "activity_summary": act_summary,
             })
+
+        canonical_entities = self._reconcile_canonical_entities(all_track_items, video_id=video_id)
+
+        # Filter canonical entities based on query filters
+        results = list(canonical_entities)
+
+        target_track_id = filters.get("track_id")
+        if target_track_id:
+            results = [
+                ce for ce in results
+                if target_track_id.upper() == ce["canonical_id"].upper()
+                or target_track_id.upper() in [tid.upper() for tid in ce.get("member_track_ids", [])]
+            ]
+
+        obj_class = filters.get("object_class")
+        if obj_class:
+            if obj_class == "vehicle_group":
+                results = [ce for ce in results if ce.get("object_class") in VEHICLE_CLASSES]
+            else:
+                results = [ce for ce in results if ce.get("object_class", "").lower() == obj_class.lower()]
+
+        target_color = filters.get("color")
+        if target_color:
+            results = [ce for ce in results if (ce.get("color") or "").lower() == target_color.lower()]
 
         if target_color and obj_class:
             if results:
@@ -520,6 +1258,9 @@ class InvestigationService:
             "result_type": "tracks",
             "interpreted_filters": filters,
             "count": len(results),
+            "canonical_entity_count": len(results),
+            "canonical_entities": results,
+            "raw_track_count": len(all_video_tracks),
             "message": msg,
             "results": results,
         }

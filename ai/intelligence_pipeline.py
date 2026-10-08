@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
 import cv2
 import numpy as np
+import math
 
 from ai.schemas import (
     BoundingBox,
@@ -104,10 +105,12 @@ def aggregate_track_clothing_color(track: TrackedObject) -> None:
     agreement = top_w / total_w if total_w > 0 else 0.0
 
     # Multi-frame consensus gating:
-    # Require at least 2 consistent observations and agreement >= 0.45,
-    # or single highly-confident observation if only 1 frame was observed
-    if (top_count >= 2 and agreement >= 0.45) or (top_count >= 1 and agreement >= 0.80 and len(valid_upper) == 1):
-        consensus_conf = min(0.95, max(0.50, agreement * 0.90))
+    # Require at least 2 consistent observations and agreement >= 0.45.
+    # Single-frame observations are unconfirmed and must NOT receive false 0.9000 confidence.
+    if top_count >= 2 and agreement >= 0.45:
+        obs_factor = min(1.0, top_count / 5.0)
+        avg_input_conf = top_w / max(1, top_count)
+        consensus_conf = min(0.95, max(0.45, agreement * (0.50 + 0.45 * obs_factor) * min(1.0, avg_input_conf / 0.70)))
         track.color = top_color
         track.color_confidence = round(consensus_conf, 4)
         if track.visual_attributes is None:
@@ -117,14 +120,22 @@ def aggregate_track_clothing_color(track: TrackedObject) -> None:
             "color_name": top_color,
             "confidence": round(consensus_conf, 4),
             "observation_count": top_count,
-            "is_confirmed": (top_count >= 2 and agreement >= 0.45),
+            "is_confirmed": True,
         }
-    elif agreement < 0.40:
-        # Ambiguous / split votes: do NOT invent a color
+    else:
+        # Insufficient temporal consensus (< 2 observations or low agreement):
+        # Do NOT invent or commit an unverified color
         track.color = None
         track.color_confidence = None
-        if track.visual_attributes is not None and "clothing_color" in track.visual_attributes:
-            track.visual_attributes["clothing_color"]["is_confirmed"] = False
+        if track.visual_attributes is None:
+            track.visual_attributes = {}
+        track.visual_attributes["clothing_color"] = {
+            "color": top_color,
+            "color_name": top_color,
+            "confidence": min(0.40, round(agreement * 0.40, 4)),
+            "observation_count": top_count,
+            "is_confirmed": False,
+        }
 
 
 class SecurityIntelligencePipeline:
@@ -463,7 +474,8 @@ class SecurityIntelligencePipeline:
                             "visual_attributes": t.visual_attributes,
                             "attribute_history": list(t.attribute_history) if t.attribute_history else [],
                             "object_class": t.object_class,
-                            "current_bbox": t.current_bbox,
+                            "trajectory": list(t.trajectory) if t.trajectory else [],
+                            "history_bboxes": list(t.history_bboxes) if t.history_bboxes else [],
                         }
                         for t in all_tracks
                     }
@@ -488,38 +500,51 @@ class SecurityIntelligencePipeline:
                         )
                     all_tracks = self.tracker.finalize()
 
-                    # O(1) attribute restoration with spatial fallback
+                    # Strict contemporaneous temporal-spatial attribute restoration (zero cross-track color leakage)
                     for trk in all_tracks:
+                        matched_prior = None
+
+                        # Check exact track_id match first
                         prior = prior_track_attrs.get(trk.track_id)
                         if prior and prior["object_class"] == trk.object_class:
-                            trk.color = prior["color"]
-                            trk.color_confidence = prior["color_confidence"]
-                            trk.visual_attributes = prior["visual_attributes"]
-                            trk.attribute_history = prior["attribute_history"]
-                        elif trk.object_class == "person":
+                            p_traj = prior.get("trajectory", [])
+                            t_traj = trk.trajectory or []
+                            shared_ts = set(p[0] for p in p_traj).intersection(set(t[0] for t in t_traj))
+                            if shared_ts:
+                                p_map = {p[0]: (p[1], p[2]) for p in p_traj}
+                                sim_dists = [math.hypot(x - p_map[ts][0], y - p_map[ts][1]) for ts, x, y in t_traj if ts in p_map]
+                                if sim_dists and (sum(sim_dists) / len(sim_dists)) <= 40.0:
+                                    matched_prior = prior
+                            elif not p_traj and not t_traj:
+                                matched_prior = prior
+
+                        # If not matched by exact ID, search prior tracks of same class with contemporaneous overlap
+                        if not matched_prior:
+                            best_candidate = None
+                            best_overlap_score = float("inf")
+                            t_traj = trk.trajectory or []
+                            t_ts_set = set(t[0] for t in t_traj)
                             for p_id, p_data in prior_track_attrs.items():
-                                if p_data["object_class"] == "person" and p_data["color"]:
-                                    p_bbox = p_data.get("current_bbox")
-                                    t_bbox = trk.current_bbox
-                                    if p_bbox and t_bbox:
-                                        p_x1 = p_bbox.x1 if hasattr(p_bbox, "x1") else p_bbox.get("x1", 0)
-                                        p_y1 = p_bbox.y1 if hasattr(p_bbox, "y1") else p_bbox.get("y1", 0)
-                                        p_x2 = p_bbox.x2 if hasattr(p_bbox, "x2") else p_bbox.get("x2", 0)
-                                        p_y2 = p_bbox.y2 if hasattr(p_bbox, "y2") else p_bbox.get("y2", 0)
-                                        t_x1 = t_bbox.x1 if hasattr(t_bbox, "x1") else t_bbox.get("x1", 0)
-                                        t_y1 = t_bbox.y1 if hasattr(t_bbox, "y1") else t_bbox.get("y1", 0)
-                                        t_x2 = t_bbox.x2 if hasattr(t_bbox, "x2") else t_bbox.get("x2", 0)
-                                        t_y2 = t_bbox.y2 if hasattr(t_bbox, "y2") else t_bbox.get("y2", 0)
-                                        p_cx = (p_x1 + p_x2) / 2
-                                        p_cy = (p_y1 + p_y2) / 2
-                                        t_cx = (t_x1 + t_x2) / 2
-                                        t_cy = (t_y1 + t_y2) / 2
-                                        if abs(p_cx - t_cx) < 150 and abs(p_cy - t_cy) < 150:
-                                            trk.color = p_data["color"]
-                                            trk.color_confidence = p_data["color_confidence"]
-                                            trk.visual_attributes = p_data["visual_attributes"]
-                                            trk.attribute_history = p_data["attribute_history"]
-                                            break
+                                if p_data["object_class"] != trk.object_class:
+                                    continue
+                                p_traj = p_data.get("trajectory", [])
+                                shared_ts = t_ts_set.intersection(set(p[0] for p in p_traj))
+                                if len(shared_ts) >= 2 or (len(t_traj) == 1 and len(shared_ts) == 1):
+                                    p_map = {p[0]: (p[1], p[2]) for p in p_traj}
+                                    dists = [math.hypot(x - p_map[ts][0], y - p_map[ts][1]) for ts, x, y in t_traj if ts in p_map]
+                                    avg_dist = sum(dists) / len(dists)
+                                    if avg_dist <= 35.0 and avg_dist < best_overlap_score:
+                                        best_overlap_score = avg_dist
+                                        best_candidate = p_data
+                            if best_candidate:
+                                matched_prior = best_candidate
+
+                        if matched_prior:
+                            trk.color = matched_prior["color"]
+                            trk.color_confidence = matched_prior["color_confidence"]
+                            trk.visual_attributes = matched_prior["visual_attributes"]
+                            trk.attribute_history = matched_prior["attribute_history"]
+
                         if trk.object_class == "person" and not trk.color:
                             aggregate_track_clothing_color(trk)
 

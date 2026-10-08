@@ -194,10 +194,9 @@ export default function AppShell() {
     setInspectingVideoId(null);
   };
 
-  // Find the canonical demo burglary video (0d4d92f9-19f8-42e3-925f-1931cb557705)
+  // Find the active demo burglary video (latest processed)
   const demoBurglaryVideo =
-    recentVideos.find((v) => v.id === "0d4d92f9-19f8-42e3-925f-1931cb557705") ||
-    recentVideos.find((v) => v.filename.toLowerCase().includes("burglary") && (v.incidents_count || 0) >= 12) ||
+    recentVideos.find((v) => v.filename.toLowerCase().includes("burglary") && v.status === "processed") ||
     recentVideos.find((v) => v.filename.toLowerCase().includes("burglary")) ||
     recentVideos[0];
 
@@ -797,18 +796,18 @@ export default function AppShell() {
             <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
               {[...recentVideos]
                 .sort((a, b) => {
-                  if (a.id === "0d4d92f9-19f8-42e3-925f-1931cb557705") return -1;
-                  if (b.id === "0d4d92f9-19f8-42e3-925f-1931cb557705") return 1;
-                  return 0;
+                  const timeA = new Date(a.uploaded_at || 0).getTime();
+                  const timeB = new Date(b.uploaded_at || 0).getTime();
+                  return timeB - timeA;
                 })
                 .map((video) => {
-                  const isCanonical = video.id === "0d4d92f9-19f8-42e3-925f-1931cb557705";
+                  const isBurglaryActive = video.id === demoBurglaryVideo?.id;
                   return (
                     <div
                       key={video.id}
                       onClick={() => handleOpenVideoInvestigation(video.id, video.filename)}
                       className={`p-3.5 rounded-lg border cursor-pointer flex items-center justify-between transition-colors ${
-                        isCanonical
+                        isBurglaryActive
                           ? "bg-[#14231E] border-[#19B89A]/50 hover:border-[#19B89A]"
                           : "bg-[#1D2128] border-[#2A3038] hover:border-[#19B89A]"
                       }`}
@@ -816,9 +815,9 @@ export default function AppShell() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-semibold text-[#F5F7FA] truncate">{video.filename}</span>
-                          {isCanonical && (
+                          {isBurglaryActive && (
                             <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-[#19B89A]/20 text-[#19B89A] border border-[#19B89A]/40 shrink-0">
-                              CANONICAL BENCHMARK
+                              LATEST PROCESSED
                             </span>
                           )}
                         </div>

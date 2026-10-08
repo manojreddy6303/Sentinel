@@ -164,6 +164,29 @@ class ObjectTracker:
 
         return matched_pairs, matched_track_ids, matched_det_indices
 
+    @staticmethod
+    def _is_duplicate_box(
+        b1: BoundingBox,
+        b2: BoundingBox,
+        iou_thresh: float = 0.45,
+        containment_thresh: float = 0.70,
+    ) -> bool:
+        """Check if two bounding boxes substantially overlap the same physical entity."""
+        if b1.iou(b2) >= iou_thresh:
+            return True
+        ix1 = max(b1.x1, b2.x1)
+        iy1 = max(b1.y1, b2.y1)
+        ix2 = min(b1.x2, b2.x2)
+        iy2 = min(b1.y2, b2.y2)
+        iw = max(0.0, ix2 - ix1)
+        ih = max(0.0, iy2 - iy1)
+        inter = iw * ih
+        if inter > 0:
+            min_area = min(b1.area, b2.area)
+            if min_area > 0 and (inter / min_area) >= containment_thresh:
+                return True
+        return False
+
     def update(
         self,
         timestamp: float,
@@ -182,6 +205,7 @@ class ObjectTracker:
             frame_height: frame height in pixels (for distance normalization)
             frame_bgr: raw BGR frame (unused by ByteTrack — accepted for interface compatibility)
         """
+
         # Filter detections for trackable surveillance classes
         current_dets: List[Tuple[str, float, BoundingBox, Dict[str, Any]]] = []
         for det in detections:
@@ -205,6 +229,24 @@ class ObjectTracker:
                 continue
             conf = float(det.get("confidence", 0.0))
             current_dets.append((cls, conf, bbox, det))
+
+        # Intra-frame duplicate suppression: suppress redundant co-located detections of same class
+        if len(current_dets) > 1:
+            filtered_dets: List[Tuple[str, float, BoundingBox, Dict[str, Any]]] = []
+            for item in sorted(
+                current_dets,
+                key=lambda x: (str(x[3].get("validation_status", "VALID")).upper() == "VALID", x[1]),
+                reverse=True,
+            ):
+                cls, conf, bbox, raw_det = item
+                is_dup = False
+                for kept_cls, _, kept_bbox, _ in filtered_dets:
+                    if kept_cls == cls and self._is_duplicate_box(bbox, kept_bbox):
+                        is_dup = True
+                        break
+                if not is_dup:
+                    filtered_dets.append(item)
+            current_dets = filtered_dets
 
         # Age out coasting tracks exceeding max_missing_seconds BEFORE matching current frame
         for track in self._tracks.values():
@@ -294,6 +336,19 @@ class ObjectTracker:
             if idx in matched_det_indices:
                 continue
             d_cls, d_conf, d_bbox, raw_det = current_dets[idx]
+
+            # Redundant spawn guard: do not initiate a new track if detection substantially overlaps an active matched track of same class
+            is_redundant_spawn = False
+            for t_id in matched_track_ids:
+                trk = self._tracks.get(t_id)
+                if trk and trk.object_class == d_cls and self._is_duplicate_box(d_bbox, trk.current_bbox, iou_thresh=0.35, containment_thresh=0.65):
+                    is_redundant_spawn = True
+                    if isinstance(raw_det, dict):
+                        raw_det["track_id"] = trk.track_id
+                    break
+            if is_redundant_spawn:
+                continue
+
             track_id = f"TRACK-{self._next_id:03d}"
             self._next_id += 1
             cx, cy = d_bbox.centroid

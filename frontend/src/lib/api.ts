@@ -30,6 +30,8 @@ export interface VideoMetadata {
   grouped_events_count?: number;
   stream_url?: string;
   playback_url?: string;
+  processing_stage?: string;
+  progress_percentage?: number;
 }
 
 export interface VideoPlaybackStatusResponse {
@@ -529,12 +531,16 @@ export interface AIInvestigateResponse {
   is_supported: boolean;
   answer: string;
   count?: number;
+  canonical_entity_count?: number;
   structured_query?: Record<string, unknown>;
   summary?: VideoSummaryData;
   sources: {
     detections: AISourceDetection[];
     events: AISourceEvent[];
     evidence: AISourceEvidence[];
+    tracks?: unknown[];
+    canonical_entities?: unknown[];
+    security_events?: unknown[];
   };
   limitations: string[];
 }

@@ -273,6 +273,17 @@ class InvestigationParser:
                 },
             }
 
+        # 1d. Check for Person Clothing Color Summary queries
+        if re.search(r"\b(?:what\s+colou?rs?|what\s+colou?r\s+(?:clothes|clothing|dresses?|attire|garments?)|colou?r\s+of\s+(?:their|the)?\s*(?:clothes|clothing|dresses?|attire)|describe\s+(?:their|the)?\s*(?:clothing\s+)?colou?rs?|clothing\s+colou?rs?|what\s+were\s+(?:the\s+)?clothing\s+colou?rs?)\b", cleaned):
+            return {
+                "is_supported": True,
+                "result_type": "tracks",
+                "interpreted_filters": {
+                    "object_class": "person",
+                    "color_summary": True,
+                },
+            }
+
         # 1e. Check for Phase 8 Security Intelligence Events queries
         if (
             re.search(r"\b(potential\s+intrusions?|intrusions?)\b", cleaned)
@@ -601,12 +612,13 @@ class InvestigationParser:
                 },
             }
 
-        if re.search(r"\b(crowd\s+dispersals?|dispersal|crowd\s+dispersing|show\s+crowd\s+dispersal)\b", cleaned):
+        if re.search(r"\b(?:crowd\s+dispers\w*|did\s+(?:the|a)?\s*crowd\s+disperse|dispers\w*\s+as\s+a\s+crowd|people\s+disperse\s+as\s+a\s+crowd|any\s+crowd\s+dispers\w*|dispersals?|crowd\s+disperse)\b", cleaned):
             return {
                 "is_supported": True,
                 "result_type": "security_events",
                 "interpreted_filters": {
                     "event_type": "POTENTIAL_CROWD_DISPERSAL",
+                    "category": "crowd",
                 },
             }
 
@@ -799,8 +811,17 @@ class InvestigationParser:
 
         # 2. Determine result type: "count", "events", or "detections"
         result_type = "detections"
+        count_mode = None
         if re.search(r"\b(how\s+many|count|total\s+number)\b", cleaned):
             result_type = "count"
+            if re.search(r"\b(?:tracks?|tracklets?)\b", cleaned):
+                count_mode = "tracklets"
+            elif re.search(r"\b(?:person\s+detections?|detection\s+records?|detection\s+observations?|observations?)\b", cleaned) and not re.search(r"\bpeople\s+(?:were\s+)?detected\b", cleaned):
+                count_mode = "raw_detections"
+            elif re.search(r"\b(?:how\s+many\s+(?:people|persons?|humans?|individuals?|actors?|vehicles?|cars?)\s+(?:were\s+)?detected|how\s+many\s+were\s+detected)\b", cleaned):
+                count_mode = "ambiguous_detected"
+            else:
+                count_mode = "canonical_people"
         elif re.search(r"\b(events?|timeline|activities|activity|happened|occurred)\b", cleaned) and not re.search(r"\b(detections?|objects?)\b", cleaned):
             result_type = "events"
 
@@ -912,6 +933,7 @@ class InvestigationParser:
                 "min_confidence": min_confidence,
                 "max_confidence": max_confidence,
                 "is_unique": is_unique,
+                "count_mode": count_mode,
             },
         }
 

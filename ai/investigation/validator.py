@@ -181,6 +181,19 @@ class StructuredIntentValidator:
                 if not sanitized["event_type"]:
                     sanitized["result_type"] = "tracks"
 
+            # Specific event prioritization: recognize crowd dispersal inquiries generically
+            if re.search(r"\b(?:crowd\s+dispers\w*|did\s+(?:the|a)?\s*crowd\s+disperse|dispers\w*\s+as\s+a\s+crowd|people\s+disperse\s+as\s+a\s+crowd|any\s+crowd\s+dispers\w*|dispersals?|crowd\s+disperse)\b", q_lower):
+                sanitized["intent"] = "investigate"
+                sanitized["event_type"] = "POTENTIAL_CROWD_DISPERSAL"
+                sanitized["category"] = "crowd"
+                sanitized["result_type"] = "security_events"
+                sanitized["is_activity_request"] = False
+                sanitized["is_summary_request"] = False
+
+        # Priority order: specific event intent > generic activity intent
+        if sanitized.get("event_type"):
+            sanitized["is_activity_request"] = False
+
         # Validate object classes
         raw_classes = raw_intent.get("object_classes")
         if raw_classes:

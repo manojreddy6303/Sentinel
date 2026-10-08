@@ -65,6 +65,14 @@ _detector: Optional["YOLODetector"] = None
 
 # Active processing locks per video_id to enforce idempotency across concurrent requests
 import threading
+import hashlib
+
+ANALYSIS_PIPELINE_VERSION = "2.1.0"
+_PROCESSING_STAGES: Dict[str, Dict[str, Any]] = {}
+
+def _set_stage(vid: str, stage: str, pct: int):
+    _PROCESSING_STAGES[vid] = {"stage": stage, "percentage": pct}
+
 _processing_locks: Dict[str, threading.Lock] = {}
 _processing_locks_guard = threading.Lock()
 
@@ -186,16 +194,17 @@ def validate_video_content(header_bytes: bytes, extension: str) -> bool:
 
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
-async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def upload_video(request: Request, file: UploadFile = File(...)) -> Dict[str, Any]:
     """
     Upload a security surveillance video to Sentinel storage.
     
     Validates:
-    - File presence
-    - Non-empty payload
+    - Host storage capacity & free-disk guard
+    - File presence & non-empty payload
     - File extension (.mp4, .mov, .avi, etc.)
     - Binary video content integrity
     - Path safety (prevents path traversal)
+    - Atomic chunk streaming with automatic cleanup on failure
     """
     if not file or not file.filename:
         raise HTTPException(
@@ -213,6 +222,20 @@ async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported file format '{extension or 'unknown'}'. Supported formats are: {allowed}.",
+        )
+
+    # 1.5 Storage Capacity Guard (Reject before writing if disk is critically full)
+    from backend.app.services.storage_service import storage_service
+    content_len_header = request.headers.get("content-length")
+    estimated_size = int(content_len_header) if content_len_header and content_len_header.isdigit() else 10 * 1024 * 1024
+    has_capacity, cap_msg, free_gb, rec_gb = storage_service.check_storage_capacity(
+        incoming_file_size_bytes=estimated_size,
+        target_dir=settings.STORAGE_UPLOADS_DIR,
+    )
+    if not has_capacity:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=cap_msg,
         )
 
     # 2. Inspect initial chunk for non-empty and signature validation
@@ -238,16 +261,17 @@ async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
             detail=f"Uploaded file '{original_filename}' is not a valid video file.",
         )
 
-    # 3. Generate unique video ID and secure target path
+    # 3. Generate unique video ID and secure target paths
     video_id = str(uuid.uuid4())
     saved_filename = f"{video_id}_{clean_base}"
     uploads_dir = settings.STORAGE_UPLOADS_DIR
     target_path = (uploads_dir / saved_filename).resolve()
+    temp_path = (uploads_dir / f"{video_id}_{clean_base}.upload.tmp").resolve()
 
     # Prevent path traversal: ensure target_path is strictly inside uploads_dir
     try:
         resolved_uploads = uploads_dir.resolve()
-        if not str(target_path).startswith(str(resolved_uploads)):
+        if not str(target_path).startswith(str(resolved_uploads)) or not str(temp_path).startswith(str(resolved_uploads)):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Security violation: Invalid file storage path.",
@@ -258,47 +282,69 @@ async def upload_video(file: UploadFile = File(...)) -> Dict[str, Any]:
             detail=f"Invalid file path: {exc}",
         )
 
-    # 4. Stream remainder of the file to disk in chunks
+    # 4. Stream file to atomic temporary file first with automatic cleanup on error
     total_bytes = len(first_chunk)
+    hasher = hashlib.sha256()
+    hasher.update(first_chunk)
     try:
-        with open(target_path, "wb") as f_out:
+        with open(temp_path, "wb") as f_out:
             f_out.write(first_chunk)
             while True:
                 chunk = await file.read(chunk_size)
                 if not chunk:
                     break
+                hasher.update(chunk)
                 total_bytes += len(chunk)
                 if total_bytes > settings.MAX_UPLOAD_SIZE_BYTES:
                     # Exceeded max size limit
                     f_out.close()
-                    if target_path.exists():
-                        target_path.unlink()
+                    storage_service.clean_failed_upload(temp_path)
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         detail=f"Video file exceeds maximum allowed size of {settings.MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB.",
                     )
                 f_out.write(chunk)
+
+        # Atomic commit: promote temporary file to final target path
+        if temp_path.exists():
+            temp_path.replace(target_path)
     except HTTPException:
+        storage_service.clean_failed_upload(temp_path)
         raise
+    except OSError as os_err:
+        storage_service.clean_failed_upload(temp_path)
+        logger.error(f"Filesystem error writing upload '{temp_path}': {os_err}")
+        if os_err.errno == 28 or "No space left on device" in str(os_err):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Insufficient storage space. {free_gb:.1f} GB available; "
+                    f"approximately {rec_gb:.1f} GB recommended for this upload and processing."
+                ),
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to store video file on server: {str(os_err)}",
+        )
     except Exception as exc:
-        logger.error(f"Failed to write video file '{target_path}': {exc}")
-        if target_path.exists():
-            try:
-                target_path.unlink()
-            except Exception:
-                pass
+        storage_service.clean_failed_upload(temp_path)
+        logger.error(f"Failed to write video file '{temp_path}': {exc}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to store video file on server: {str(exc)}",
         )
 
-    # 5. Persist video metadata sidecar (for fast lookup and streaming)
+    video_sha256 = hasher.hexdigest()
+
+    # 5. Persist video metadata sidecar (for fast lookup, content-hash deduplication, and streaming)
     metadata = {
         "video_id": video_id,
         "filename": original_filename,
         "saved_filename": saved_filename,
         "storage_path": str(target_path),
         "file_size_bytes": total_bytes,
+        "content_hash": video_sha256,
+        "analysis_version": ANALYSIS_PIPELINE_VERSION,
         "content_type": file.content_type or f"video/{extension.lstrip('.')}",
         "status": "uploaded",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
@@ -480,6 +526,10 @@ def get_video_info(video_id: str) -> Dict[str, Any]:
             with open(meta_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 data["playback_url"] = f"/api/videos/{video_id}/playback"
+                stage_info = _PROCESSING_STAGES.get(video_id)
+                if stage_info:
+                    data["processing_stage"] = stage_info.get("stage")
+                    data["progress_percentage"] = stage_info.get("percentage")
                 return data
         except Exception as exc:
             logger.error(f"Error reading metadata {meta_path}: {exc}")
@@ -764,6 +814,7 @@ def process_video(
                         "message": "Video is already being processed. Concurrent processing prevented.",
                     }
                 if not force and vid_rec.status in ("processed", "completed", "analyzed"):
+                    _set_stage(video_id, "Completed", 100)
                     # Video is already processed. Return existing results idempotently without re-running detection.
                     repo = get_event_repository()
                     existing_events = repo.get_events(video_id, validation_status="ALL")
@@ -791,6 +842,7 @@ def process_video(
             db_check.close()
 
         # 2. Open video and extract metadata
+        _set_stage(video_id, "Preparing video", 10)
         processor = VideoProcessor(
             video_path=str(video_file_path),
             sample_rate_fps=settings.VIDEO_SAMPLE_RATE_FPS,
@@ -879,6 +931,7 @@ def process_video(
         enhancer = AdaptiveLowLightEnhancer()
         scene_report = None
 
+        _set_stage(video_id, "Detecting people/objects", 35)
         try:
             for frame_number, timestamp, frame_bgr in processor.sample_frames():
                 # Analyze scene lighting condition on initial frames
@@ -946,6 +999,7 @@ def process_video(
         )
     
         # 6. Run Security Intelligence & Tracking on validated detections
+        _set_stage(video_id, "Tracking", 55)
         intel_tracks_count = 0
         intel_events_count = 0
         try:
@@ -968,6 +1022,7 @@ def process_video(
                 for z in existing_zones
             ]
             intel_pipe = SecurityIntelligencePipeline(zones=zone_defs)
+            _set_stage(video_id, "Analyzing interactions", 70)
             # Pass all raw events and in-memory sampled frames to eliminate redundant disk re-reads.
             # Pipeline internally filters to validated events before feeding tracker.
             intel_res = intel_pipe.process_video_intelligence(
@@ -990,6 +1045,7 @@ def process_video(
                 specialized_observations=intel_res.get("specialized_observations", []),
                 correlated_incidents=intel_res.get("correlated_incidents", []),
             )
+            _set_stage(video_id, "Correlating events", 80)
             _correlate_security_evidence(video_id, intel_res["security_events"])
             try:
                 from backend.app.services.evidence_service import EvidenceService
@@ -1006,6 +1062,7 @@ def process_video(
             logger.warning(f"Security intelligence deferred or failed for {video_id}: {intel_err}")
     
         # 7. Group events temporally with full track awareness
+        _set_stage(video_id, "Generating evidence", 90)
         grouped_events = generator.group_events(video_id, events)
     
         # 8. Persist events (both raw and grouped)
@@ -1042,6 +1099,7 @@ def process_video(
             logger.warning(f"Could not update metadata sidecar for {video_id}: {exc}")
     
         # Synchronize VideoModel record in DB for database parity
+        _set_stage(video_id, "Finalizing searchable index", 98)
         try:
             from database.session import SessionLocal
             from database.models import VideoModel
@@ -1089,6 +1147,7 @@ def process_video(
             f"Processed video {video_id}: {frames_processed} frames, {validated_count} validated detections ({len(events)} raw), {len(grouped_events)} events grouped."
         )
     
+        _set_stage(video_id, "Completed", 100)
         return {
             "video_id": video_id,
             "status": "completed",
@@ -1365,6 +1424,15 @@ def ai_investigate_video(
     video_exists = meta_path.exists() or bool(
         list(settings.STORAGE_UPLOADS_DIR.glob(f"{video_id}_*"))
     )
+    if not video_exists:
+        from database.session import SessionLocal
+        from database.models import VideoModel
+        db_v = SessionLocal()
+        try:
+            video_exists = bool(db_v.query(VideoModel.id).filter(VideoModel.id == video_id).first())
+        finally:
+            db_v.close()
+
     if not video_exists:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
