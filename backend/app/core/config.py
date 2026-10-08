@@ -51,6 +51,7 @@ class Settings:
         default_origins = [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
+            "https://sentinel-umber-delta.vercel.app",
             "https://sentinel-frontend-production-8154.up.railway.app",
         ]
         raw = os.getenv("CORS_ORIGINS") or os.getenv("BACKEND_CORS_ORIGINS")
@@ -59,15 +60,17 @@ class Settings:
         raw = raw.strip()
         if raw == "*":
             return ["*"]
+        custom = []
         if raw.startswith("[") and raw.endswith("]"):
             import json
             try:
                 parsed = json.loads(raw)
                 if isinstance(parsed, list):
-                    return [str(item) for item in parsed if item]
+                    custom = [str(item) for item in parsed if item]
             except Exception:
                 pass
-        custom = [o.strip() for o in raw.split(",") if o.strip()]
+        if not custom:
+            custom = [o.strip() for o in raw.split(",") if o.strip()]
         combined = list(default_origins)
         for c in custom:
             if c not in combined:
