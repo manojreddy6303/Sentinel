@@ -1052,6 +1052,11 @@ def process_video(
                 EvidenceService().reconcile_evidence_validation(video_id)
             except Exception as rec_err:
                 logger.warning(f"Could not reconcile evidence validation for {video_id}: {rec_err}")
+            try:
+                from backend.app.services.investigation_cache import InvestigationDerivedDataCache
+                InvestigationDerivedDataCache.invalidate_video(video_id)
+            except Exception:
+                pass
             intel_tracks_count = len(intel_res["tracks"])
             intel_events_count = len(intel_res["security_events"])
             logger.info(
@@ -1401,6 +1406,17 @@ class AIInvestigationRequest(BaseModel):
     history: Optional[List[Dict[str, str]]] = Field(default=None, description="Optional conversational history context")
 
 
+_shared_investigation_orchestrator = None
+
+
+def _get_investigation_orchestrator():
+    global _shared_investigation_orchestrator
+    if _shared_investigation_orchestrator is None:
+        from ai.investigation.orchestrator import InvestigationOrchestrator
+        _shared_investigation_orchestrator = InvestigationOrchestrator()
+    return _shared_investigation_orchestrator
+
+
 @router.post("/{video_id}/ai-investigate")
 def ai_investigate_video(
     video_id: str,
@@ -1439,10 +1455,9 @@ def ai_investigate_video(
             detail=f"Video with ID '{video_id}' not found.",
         )
 
-    # 3. Execute query via InvestigationOrchestrator
+    # 3. Execute query via cached InvestigationOrchestrator singleton
     try:
-        from ai.investigation.orchestrator import InvestigationOrchestrator
-        orchestrator = InvestigationOrchestrator()
+        orchestrator = _get_investigation_orchestrator()
         result = orchestrator.process_investigation(
             video_id=video_id,
             user_query=payload.query,

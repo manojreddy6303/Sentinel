@@ -527,7 +527,7 @@ export interface VideoSummaryData {
 export interface AIInvestigateResponse {
   video_id: string;
   query: string;
-  mode: "ai_assisted" | "deterministic_fallback" | "guardrail_enforced";
+  mode: "ai_assisted" | "deterministic_fallback" | "guardrail_enforced" | "deterministic_fast_path";
   is_supported: boolean;
   answer: string;
   count?: number;

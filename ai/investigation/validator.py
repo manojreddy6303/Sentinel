@@ -63,7 +63,7 @@ SYNONYM_MAP = {
 # Ethical / unsupported regex triggers
 IDENTITY_PATTERNS = [
     r"\b(who\s+is|who\s+are|who\s+was)\b",
-    r"\b(name\s+of|names\s+of|person'?s\s+name|what\s+is\s+(?:the|this|that)\s+person'?s\s+name)\b",
+    r"\b(name\s+of|names\s+of|person'?s\s+name|what\s+is\s+(?:the|this|that|his|her|their)\s+(?:person'?s\s+)?name)\b",
     r"\b(facial\s+recognition|face\s+id|identify\s+(?:this|the|a)?\s*(?:person|people|man|woman|human|individual)|identity)\b",
 ]
 

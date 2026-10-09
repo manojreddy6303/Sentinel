@@ -331,6 +331,25 @@ class InvestigationService:
         if n == 0:
             return []
 
+        cache_token = None
+        if video_id:
+            try:
+                from backend.app.services.investigation_cache import InvestigationDerivedDataCache
+                first_tid = items[0].get("track_id", "") if items else ""
+                last_tid = items[-1].get("track_id", "") if items else ""
+                max_ts = max((float(it.get("last_seen", 0.0) or 0.0) for it in items), default=0.0)
+                cache_token = f"{n}:{first_tid}:{last_tid}:{max_ts:.1f}"
+                cached = InvestigationDerivedDataCache.get_canonical_entities(video_id, cache_token)
+                if cached is not None:
+                    item_act = {it["track_id"]: it.get("activity_summary") for it in items if it.get("activity_summary")}
+                    if item_act:
+                        for c in cached:
+                            if not c.get("activity_summary") and c.get("track_id") in item_act:
+                                c["activity_summary"] = item_act[c["track_id"]]
+                    return cached
+            except Exception:
+                cache_token = None
+
         # Generic detection of static false-person artifacts (posters, mannequins, transient background noise)
         def _is_static_false_artifact(t: Dict[str, Any]) -> bool:
             if t.get("object_class") != "person":
@@ -703,6 +722,12 @@ class InvestigationService:
             verified_canonical_entities.append(ce)
 
         verified_canonical_entities.sort(key=lambda ce: (ce["first_seen"], ce["track_id"]))
+        if video_id and cache_token:
+            try:
+                from backend.app.services.investigation_cache import InvestigationDerivedDataCache
+                InvestigationDerivedDataCache.set_canonical_entities(video_id, cache_token, verified_canonical_entities)
+            except Exception:
+                pass
         return verified_canonical_entities
 
 

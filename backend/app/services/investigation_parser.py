@@ -112,7 +112,7 @@ OBJECT_SYNONYMS = {
 # Ethical / unsupported query patterns (identity recognition, criminal attribution, emotion/threat speculation)
 UNSUPPORTED_PATTERNS = [
     r"\b(who\s+is|who\s+are|who\s+was)\b",
-    r"\b(name\s+of|names\s+of|person'?s\s+name|what\s+is\s+(?:the|this|that)\s+person'?s\s+name)\b",
+    r"\b(name\s+of|names\s+of|person'?s\s+name|what\s+is\s+(?:the|this|that|his|her|their)\s+(?:person'?s\s+)?name)\b",
     r"\b(criminal|criminals|thief|thieves|suspect|suspects|terrorist|guilty)\b",
     r"\bdefinitely\s+(?:a\s+)?(?:theft|crime|robbery|stealing)\b",
     r"\bis\s+this\s+a\s+crime\b",
@@ -1226,4 +1226,175 @@ class InvestigationParser:
             min_confidence = 0.70
 
         return start_time, end_time, min_confidence, max_confidence
+
+    @classmethod
+    def is_complex_narrative_query(cls, query: str) -> bool:
+        """
+        Detect queries that require complex narrative synthesis or reasoning.
+        Examples:
+        - "Explain what happened in chronological order."
+        - "Summarize suspicious behavior."
+        - "Build an investigative narrative."
+        - "Explain relationships among several events."
+        """
+        cleaned = (query or "").strip().lower()
+        if not cleaned:
+            return False
+
+        # Exclude simple structured questions
+        if re.search(r"\b(how\s+many|count\s+of|what\s+colou?rs?|what\s+color\s+clothes|when\s+did|give\s+timestamps?|show\s+the\s+\w+\s+person|was\s+theft\s+detected|was\s+there\s+crowd|did\s+anyone\s+take)\b", cleaned):
+            return False
+
+        patterns = [
+            r"\b(explain\s+(?:what\s+happened|the\s+sequence|the\s+storyline))\b",
+            r"\b(chronological\s+order|chronological\s+narrative|chronological\s+timeline)\b",
+            r"\b(build\s+(?:an?\s+)?investigative\s+narrative|investigative\s+narrative)\b",
+            r"\b(summarize\s+suspicious\s+behavior|narrative\s+summary|suspicious\s+narrative)\b",
+            r"\b(explain\s+relationships?|relationship\s+between\s+events?|relationships?\s+among)\b",
+            r"\b(synthesize\s+(?:the\s+)?investigation|investigative\s+report\s+narrative)\b",
+            r"\b(why\s+did\s+(?:this|the\s+system|the\s+individual))\b",
+            r"\b(tell\s+me\s+the\s+full\s+story|full\s+story\s+of\s+events?)\b",
+        ]
+        return any(bool(re.search(pat, cleaned)) for pat in patterns)
+
+    @classmethod
+    def classify_structured_intent(cls, query: str) -> Dict[str, Any]:
+        """
+        Classifies common structured intents for Sentinel universal deterministic fast path:
+        PERSON_COUNT, RAW_TRACK_COUNT, PERSON_COLOR_COUNT, PERSON_COLOR_LIST,
+        PERSON_SEARCH, EVENT_LIST, EVENT_EXISTS, EVENT_COUNT, EVENT_TIMESTAMP,
+        INCIDENT_LOOKUP, OBJECT_COUNT, OBJECT_SEARCH, TIMELINE_LOOKUP.
+        """
+        cleaned = (query or "").strip().lower()
+
+        # Check complex narrative first
+        if cls.is_complex_narrative_query(cleaned):
+            return {
+                "intent": "COMPLEX_NARRATIVE",
+                "is_deterministic_fast_path": False,
+                "is_complex_narrative": True,
+            }
+
+        # 1. RAW_TRACK_COUNT: explicitly asking for tracks / tracklets
+        if re.search(r"\b(how\s+many|count|number\s+of)\b", cleaned) and re.search(r"\b(tracks?|tracklets?)\b", cleaned):
+            return {
+                "intent": "RAW_TRACK_COUNT",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 2. PERSON_COLOR_COUNT: asking for person count filtered by color
+        matched_color = None
+        for col in ["blue", "black", "red", "white", "grey", "gray", "silver", "green", "yellow", "orange", "brown"]:
+            if re.search(r"\b" + col + r"\b", cleaned):
+                matched_color = "grey" if col == "gray" else col
+                break
+
+        is_count_query = bool(re.search(r"\b(how\s+many|count|total\s+number)\b", cleaned))
+
+        if is_count_query and matched_color and re.search(r"\b(people|person|persons|human|humans|men|man|women|woman|guy|guys|wore|wearing)\b", cleaned):
+            return {
+                "intent": "PERSON_COLOR_COUNT",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+                "color": matched_color,
+            }
+
+        # 3. PERSON_COUNT: "How many people were detected?", "How many distinct people are there?", "count of people"
+        if is_count_query and re.search(r"\b(people|person|persons|human|humans|individuals?|actors?)\b", cleaned):
+            return {
+                "intent": "PERSON_COUNT",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 4. PERSON_COLOR_LIST: "What colors were detected?", "What color clothes?", "Describe clothing colors"
+        if re.search(r"\b(?:what\s+colou?rs?|what\s+colou?r\s+(?:clothes|clothing|dresses?|attire|garments?)|colou?r\s+of\s+(?:their|the)?\s*(?:clothes|clothing|dresses?|attire)|describe\s+(?:their|the)?\s*(?:clothing\s+)?colou?rs?|clothing\s+colou?rs?|what\s+were\s+(?:the\s+)?clothing\s+colou?rs?)\b", cleaned):
+            return {
+                "intent": "PERSON_COLOR_LIST",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 5. PERSON_SEARCH: "Show the person wearing blue", "Show the blue person", "List detected people", "Show all people detected", "Show person"
+        if (matched_color and re.search(r"\b(show|find|list|who|which)\b", cleaned) and re.search(r"\b(person|people|someone|suspect|guy|lady|man|woman)\b", cleaned)) or \
+           re.search(r"\b(list\s+(?:detected\s+)?people|show\s+(?:all\s+)?people(?:\s+detected)?|show\s+person|detected\s+people)\b", cleaned):
+            return {
+                "intent": "PERSON_SEARCH",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+                "color": matched_color,
+            }
+
+        # 6. EVENT_TIMESTAMP: "When did the incident occur?", "When did theft occur?", "Give timestamps for detected events", "What time did..."
+        if re.search(r"\b(when\s+did|what\s+time\s+did|timestamps?\s+for|give\s+timestamps?|at\s+what\s+time)\b", cleaned) or \
+           re.search(r"\b(time\s+of\s+(?:the\s+)?(?:incident|theft|event|occurrence))\b", cleaned):
+            return {
+                "intent": "EVENT_TIMESTAMP",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 7. EVENT_COUNT: "How many events were detected?", "How many incidents occurred?"
+        if is_count_query and re.search(r"\b(events?|incidents?|activities|alerts?)\b", cleaned):
+            return {
+                "intent": "EVENT_COUNT",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 8. EVENT_EXISTS: "Was theft detected?", "Did theft occur?", "Was there crowd dispersal?", "Did the crowd disperse?", "Was a fall detected?", "Any collision?", "Was anything stolen?"
+        if re.search(r"\b(was\s+(?:there\s+)?(?:a\s+)?(?:theft|crime|fall|collision|crowd\s+dispersal|fire|smoke|weapon)|did\s+(?:theft\s+occur|anyone\s+take|the\s+crowd\s+disperse|a\s+fall\s+occur)|any\s+(?:theft|burglary|crowd\s+dispersal|fall|collision|incident))\b", cleaned):
+            return {
+                "intent": "EVENT_EXISTS",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 9. EVENT_LIST: "What events were detected?", "List detected events", "Show events", "What incidents occurred"
+        if re.search(r"\b(what\s+events?|list\s+(?:detected\s+)?events?|show\s+(?:all\s+)?events?|what\s+incidents?|detected\s+events?|all\s+events?)\b", cleaned):
+            return {
+                "intent": "EVENT_LIST",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 10. INCIDENT_LOOKUP: "Incident details", "What incidents occurred?", "Show theft incident"
+        if re.search(r"\b(incident\s+details?|incidents?\s+occurred|show\s+theft\s+incident|security\s+events?)\b", cleaned):
+            return {
+                "intent": "INCIDENT_LOOKUP",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 11. OBJECT_COUNT: "How many cars were detected?", "How many vehicles?", "count of backpacks"
+        if is_count_query:
+            return {
+                "intent": "OBJECT_COUNT",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 12. OBJECT_SEARCH: "Show cars", "What vehicles were detected?", "Show detections above 70% confidence"
+        if re.search(r"\b(show|find|list|what)\b", cleaned) and re.search(r"\b(cars?|vehicles?|trucks?|buses?|backpacks?|bottles?|phones?|detections?)\b", cleaned):
+            return {
+                "intent": "OBJECT_SEARCH",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # 13. TIMELINE_LOOKUP: "Timeline of events", "Show timeline"
+        if re.search(r"\b(timeline|chronology)\b", cleaned):
+            return {
+                "intent": "TIMELINE_LOOKUP",
+                "is_deterministic_fast_path": True,
+                "is_complex_narrative": False,
+            }
+
+        # Default: structured inquiry
+        return {
+            "intent": "STRUCTURED_INQUIRY",
+            "is_deterministic_fast_path": True,
+            "is_complex_narrative": False,
+        }
 

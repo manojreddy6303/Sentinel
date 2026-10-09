@@ -10,6 +10,7 @@ Provides modular integration for LLM providers:
 import json
 import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 
@@ -71,12 +72,15 @@ class GeminiProvider(LLMProvider):
         "gemini-flash-latest",
     ]
 
+    _circuit_breaker_until: float = 0.0
+    _circuit_breaker_reason: Optional[str] = None
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: str = "gemini-3.5-flash-lite",
         temperature: float = 0.1,
-        timeout: float = 30.0,
+        timeout: float = 5.0,  # Strict 5.0s timeout for Sentinel Phase 3
     ):
         self.api_key = (api_key or "").strip()
         self.model = model or "gemini-3.5-flash-lite"
@@ -105,6 +109,15 @@ class GeminiProvider(LLMProvider):
                 "fallback_reason": "deterministic_grounded_fallback",
             })
             raise LLMProviderError("Gemini API key is not configured.")
+
+        if time.time() < self.__class__._circuit_breaker_until:
+            rem = self.__class__._circuit_breaker_until - time.time()
+            self.last_status.update({
+                "request_status": "failed",
+                "failure_reason": f"circuit_breaker_active ({self.__class__._circuit_breaker_reason})",
+                "fallback_reason": "deterministic_grounded_fallback",
+            })
+            raise LLMProviderError(f"Gemini circuit breaker active for {rem:.1f}s ({self.__class__._circuit_breaker_reason}).")
 
         # Candidate models list starting with configured model, followed by fallback candidates
         candidate_models = [self.model]
@@ -173,8 +186,10 @@ class GeminiProvider(LLMProvider):
                     break
                 elif resp.status_code == 429:
                     last_failure_type = "quota_exceeded"
-                    logger.warning(f"Gemini model '{cur_model}' quota exceeded (429). Attempting fallback model...")
-                    continue
+                    self.__class__._circuit_breaker_until = time.time() + 60.0
+                    self.__class__._circuit_breaker_reason = "quota_exceeded_429"
+                    logger.warning(f"Gemini model '{cur_model}' quota exceeded (429). Fast-circuit breaker enabled for 60s.")
+                    break  # Project quota reached; fast-fail immediately to preserve low latency
                 elif resp.status_code == 404:
                     last_failure_type = "model_unavailable"
                     logger.warning(f"Gemini model '{cur_model}' not found (404). Attempting fallback model...")
@@ -190,8 +205,8 @@ class GeminiProvider(LLMProvider):
             except requests.Timeout as te:
                 last_failure_type = "timeout"
                 last_error_text = str(te)
-                logger.warning(f"Gemini request timeout on model '{cur_model}'.")
-                continue
+                logger.warning(f"Gemini request timeout ({self.timeout}s) on model '{cur_model}'. Fast-failing to preserve latency.")
+                break
             except requests.RequestException as re_err:
                 last_failure_type = "connection_failure"
                 last_error_text = str(re_err)

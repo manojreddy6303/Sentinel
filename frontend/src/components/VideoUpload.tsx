@@ -1737,6 +1737,8 @@ export default function VideoUpload({
                             className={`text-xs font-mono font-bold px-2.5 py-0.5 rounded border uppercase ${
                               aiResponse.mode === "ai_assisted"
                                 ? "bg-emerald-500/20 text-emerald-400 border-emerald-500/40"
+                                : aiResponse.mode === "deterministic_fast_path"
+                                ? "bg-cyan-500/20 text-cyan-400 border-cyan-500/40"
                                 : aiResponse.mode === "guardrail_enforced"
                                 ? "bg-purple-500/20 text-purple-400 border-purple-500/40"
                                 : "bg-amber-500/20 text-amber-400 border-amber-500/40"
@@ -1744,6 +1746,8 @@ export default function VideoUpload({
                           >
                             {aiResponse.mode === "ai_assisted"
                               ? "AI-Assisted Investigation"
+                              : aiResponse.mode === "deterministic_fast_path"
+                              ? "Deterministic Fast Path"
                               : aiResponse.mode === "guardrail_enforced"
                               ? "Safety Guardrail Enforced"
                               : "AI Reasoning Unavailable — Deterministic Fallback"}
